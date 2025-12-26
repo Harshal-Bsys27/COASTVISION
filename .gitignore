@@ -1,0 +1,22 @@
+# Data and annotations
+/data/
+*.csv
+*.mp4
+*.avi
+*.jpg
+*.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints
+
+# System files
+.DS_Store
+Thumbs.db
