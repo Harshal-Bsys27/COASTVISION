@@ -1,22 +1,36 @@
-# Data and annotations
-/data/
-*.csv
-*.mp4
-*.avi
-*.jpg
-*.png
+# ==============================
+# Virtual Environment
+# ==============================
+venv/
+.venv/
 
-# Python
+# ==============================
+# Datasets & Training Outputs
+# ==============================
+dataset/
+runs/
+*.pt
+
+# ==============================
+# Python Cache
+# ==============================
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# ==============================
+# Jupyter
+# ==============================
+.ipynb_checkpoints/
+
+# ==============================
+# Environment Files
+# ==============================
 .env
-.venv
 
-# Jupyter Notebooks checkpoints
-.ipynb_checkpoints
-
-# System files
+# ==============================
+# OS Files
+# ==============================
 .DS_Store
 Thumbs.db
