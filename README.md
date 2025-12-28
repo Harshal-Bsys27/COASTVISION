@@ -1,7 +1,7 @@
-# CoastVision: AI-Powered Beach Surveillance System
+# CoastVision: AI-Powered Beach Surveillance System 
 
 ## Project Overview
-CoastVision is an AI-based surveillance system designed to detect humans in water, identify potential drowning behavior, and alert lifeguards in real-time using computer vision and machine learning.
+CoastVision is an AI-based surveillance system designed to detect humans in water, identify potential drowning behavior, and alert lifeguards in real-time using computer vision and machine learning. later the surveillance system shall be connected to an Android Application which will be for lifeguards where then can recieve alerts and images . 
 
 ## Objectives
 - Detect humans entering water zones using AI models and camera feeds.
