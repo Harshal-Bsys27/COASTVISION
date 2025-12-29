@@ -11,8 +11,9 @@ if __name__ == "__main__":
         data=DATA_YAML,
         epochs=50,
         imgsz=640,
-        batch=16,
-        device=0  # Use GPU 0
+        batch=8,  # Lowered batch size to reduce GPU load
+        device=0,  # Use GPU 0
+        resume=True  # <-- Add this line to resume from last checkpoint
     )
 
     # Save results and model weights in 'runs/' directory
