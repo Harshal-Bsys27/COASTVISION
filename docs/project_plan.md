@@ -37,7 +37,7 @@
 
 ## 7. Future Enhancements
 - Add pose estimation (MediaPipe/OpenPose) for advanced swimmer tracking.
-- Expand to rip current detection and crowd management modules.
+- (Future) Expand to rip current detection and crowd management modules when data is available.
 - Incorporate citizen-science data uploads for continuous improvement.
 - Add heatmaps and analytics for risk assessment.
 
@@ -51,6 +51,6 @@
 ---
 
 **Next Steps:**
-1. Complete data collection and annotation.
+1. Complete data collection and annotation for drowning detection.
 2. Train and validate the drowning detection model.
 3. Integrate and test in real-world scenarios before expanding features.
