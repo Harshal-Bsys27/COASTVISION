@@ -25,9 +25,14 @@ CoastVision is an AI-based surveillance system designed to detect humans in wate
     git clone https://github.com/yourusername/coastvision.git
     ```
 
-2. Install dependencies (to be updated as the project grows).
+2. Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-3. Follow the documentation in `/docs` for setup and usage.
+3. For training on Google Colab, see `/docs/colab_training_full_example.md`.
+
+4. Follow the documentation in `/docs` for setup and usage.
 
 ## Folder Structure
 

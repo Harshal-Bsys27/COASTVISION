@@ -46,10 +46,11 @@ print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU")
 
 ---
 
-## 6. Train YOLOv8 Model
+## 6. Train YOLOv8 Model with Automatic Checkpoint Saving
 
 ```python
 from ultralytics import YOLO
+import shutil
 
 DATA_YAML = '/content/dataset/data.yaml'
 
@@ -59,25 +60,72 @@ results = model.train(
     epochs=50,
     imgsz=640,
     batch=8,
-    device=0  # Use GPU
+    device=0,  # Use GPU
+    save_period=10  # Save checkpoint every 10 epochs
 )
+
+# After training completes, copy all results to Google Drive
+shutil.copytree('/content/runs', '/content/drive/MyDrive/runs', dirs_exist_ok=True)
+print("Training complete and all results saved to Drive!")
 ```
 
 ---
 
-## 7. Save Results Back to Google Drive
+## 7. (Optional) Manually Save Progress During Training
+
+If you want to save progress while training is still running, open a new cell and run:
 
 ```python
 !cp -r /content/runs /content/drive/MyDrive/
+print("Progress saved to Drive!")
+```
+
+Run this periodically (every 15-20 minutes) to back up checkpoints.
+
+---
+
+## 8. Resume Training from Last Checkpoint
+
+If your session disconnects and you want to resume training:
+
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Install Ultralytics
+!pip install ultralytics
+
+# Check for saved checkpoint
+!ls /content/drive/MyDrive/runs/detect/
+
+# Resume from last checkpoint (update path as needed)
+from ultralytics import YOLO
+
+LAST_PT = '/content/drive/MyDrive/runs/detect/train2/weights/last.pt'  # Update folder name if different
+
+model = YOLO(LAST_PT)
+results = model.train(
+    resume=True,
+    device=0  # Use GPU
+)
+
+# After training, save results to Drive
+import shutil
+shutil.copytree('/content/runs', '/content/drive/MyDrive/runs', dirs_exist_ok=True)
+print("Training resumed and completed. Results saved to Drive!")
 ```
 
 ---
 
-## 8. Download Your Model
+## 9. Download Your Model
 
-- After training, download `best.pt` and results from `/content/drive/MyDrive/runs/detect/train/weights/`.
+- After training, download `best.pt` and results from `/content/drive/MyDrive/runs/detect/trainX/weights/`.
 
 ---
 
-**Tip:**  
-- If you get a path error, check the output of `print(os.listdir('/content'))` and `print(os.listdir('/content/dataset'))` to confirm where your files are.
+## Tips
+
+- Always save `/content/runs` to Drive after training or periodically during training to prevent data loss.
+- Use `save_period=10` to automatically save checkpoints every 10 epochs.
+- If Colab disconnects, you can resume training from `last.pt` saved in your Drive.
+- Check paths with `!ls /content/drive/MyDrive/runs/detect/` to find your checkpoint folders.
