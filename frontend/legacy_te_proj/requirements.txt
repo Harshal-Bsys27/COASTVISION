@@ -1,0 +1,5 @@
+flask
+opencv-python
+ultralytics
+PyQt5
+pandas

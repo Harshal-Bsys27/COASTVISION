@@ -34,3 +34,17 @@ __pycache__/
 # ==============================
 .DS_Store
 Thumbs.db
+
+# ==============================
+# Frontend/Dashboard
+# ==============================
+frontend/dashboard/uploads/
+frontend/dashboard/*.db
+frontend/dashboard/.streamlit/
+frontend/TE PROJ/uploads/
+frontend/TE PROJ/*.db
+frontend/TE PROJ/__pycache__/
+frontend/TE PROJ/instance/
+frontend/TE PROJ/.pytest_cache/
+frontend/TE PROJ/static/output/
+frontend/TE PROJ/static/temp/
