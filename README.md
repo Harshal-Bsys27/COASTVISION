@@ -25,6 +25,30 @@ pip install -r requirements.txt
 - Local: run `scripts/train_yolov8.py`; copy the resulting `best.pt` into `models/` (root) and into `frontend/dashboard/models/` for the UI.
 - Colab: follow [docs/colab_training_full_example.md](docs/colab_training_full_example.md) (short guides: [docs/colab_training.md](docs/colab_training.md), [docs/colab_training_with_auto_backup.md](docs/colab_training_with_auto_backup.md)).
 
+## Local Training (YOLOv8 Drowning Detection)
+
+1. Activate your virtual environment:
+    ```powershell
+    & "c:\Users\HARSHAL BARHATE\OneDrive\Desktop\COASTVISION\venv\Scripts\Activate.ps1"
+    ```
+
+2. Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3. Run the training script:
+    ```bash
+    python scripts/train_yolov8.py
+    ```
+
+4. After training completes, copy the trained model:
+    ```bash
+    copy runs\detect\trainX\weights\best.pt models\best.pt
+    ```
+
+5. Use `models/best.pt` for inference or dashboard integration.
+
 ## Dashboard (PyQt, GPU-aware)
 ```powershell
 # activate venv if you use one

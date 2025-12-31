@@ -12,8 +12,8 @@ if __name__ == "__main__":
         epochs=50,
         imgsz=640,
         batch=8,  # Lowered batch size to reduce GPU load
-        device=0,  # Use GPU 0
-        resume=True  # <-- Add this line to resume from last checkpoint
+        device=0  # Use GPU 0
+        # resume=True  # <-- REMOVE or comment out this line!
     )
 
     # Save results and model weights in 'runs/' directory

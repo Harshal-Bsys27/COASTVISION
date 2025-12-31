@@ -57,29 +57,28 @@ def process_frame(frame, zone_name):
     alerts = []
     results = model(frame, verbose=False, device=device)
 
+    # Custom class names for your model
+    class_names = {
+        0: "Drowning",
+        1: "Person out of water",
+        2: "Swimming"
+    }
+
     for r in results:
         for box in r.boxes:
             cls = int(box.cls[0])
-            if cls != 0:  # only persons
-                continue
-
             conf = float(box.conf[0]) * 100
-            names = getattr(model, "names", None)
-            if isinstance(names, dict):
-                label = names.get(cls, "person")
-            elif isinstance(names, (list, tuple)) and cls < len(names):
-                label = names[cls]
-            else:
-                label = "person"
+
+            # Use your custom class names
+            label = f"{cls}: {class_names.get(cls, 'Unknown')} {conf:.1f}%"
 
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 200, 0), 3)
-            text = f"{label} {conf:.1f}%"
-            (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             cv2.rectangle(frame, (x1, y1 - th - baseline), (x1 + tw, y1), (0, 200, 0), -1)
-            cv2.putText(frame, text, (x1, y1 - baseline), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            cv2.putText(frame, label, (x1, y1 - baseline), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
             pid = f"{zone_name}_{cx}_{cy}"
             now = time.time()
