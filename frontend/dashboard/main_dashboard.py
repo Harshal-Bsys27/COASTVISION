@@ -38,15 +38,15 @@ DISPLAY_WIDTH = 480
 
 # ---------------- MODEL ----------------
 print(f"Loading YOLOv8 model from: {MODEL_PATH}")
-if not MODEL_PATH.exists():
-    raise FileNotFoundError("Model file missing. Place weights at frontend/dashboard/models/best.pt or yolov8n.pt, or update MODEL_PATH.")
 
+# Force CUDA if available, else raise error
 if torch.cuda.is_available():
-    torch.cuda.set_device(0)  # prefer first GPU (RTX 3050 present on this laptop)
+    torch.cuda.set_device(0)
     device = "cuda"
-    torch.backends.cudnn.benchmark = True  # optimize convs for constant input sizes
+    torch.backends.cudnn.benchmark = True
 else:
-    device = "cpu"
+    raise RuntimeError("CUDA GPU not available! Please install CUDA-enabled PyTorch and ensure your GPU drivers are up to date.")
+
 model = YOLO(str(MODEL_PATH)).to(device)
 print(f"Model running on: {device.upper()}")
 
