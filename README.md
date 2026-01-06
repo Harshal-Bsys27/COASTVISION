@@ -61,6 +61,22 @@ python dashboard\main_dashboard.py
 - Model: auto-loads `frontend/dashboard/models/best.pt`, else `yolov8n.pt`.
 - GPU: use a CUDA Torch build (e.g., torch 2.2.2+cu121); console will show `Model running on: CUDA`.
 
+## Performance (RTX 3050 6GB recommended settings)
+If you use 4K videos (zone1/zone2), run backend with:
+
+```powershell
+$env:COASTVISION_MAX_SIDE="1280"
+$env:COASTVISION_FPS="10"
+$env:COASTVISION_INFER_EVERY="2"
+$env:COASTVISION_IMGSZ="640"
+$env:COASTVISION_HALF="1"
+python backend\server.py
+```
+
+Notes:
+- Backend serializes GPU inference across zones for stability.
+- Frontend uses MJPEG streaming; if a stream fails, it auto-falls back to `frame.jpg` polling.
+
 ## Folder Structure
 - `/backend` — backend API/streaming (if used)
 - `/frontend` — PyQt dashboard (`dashboard/`), legacy prototype (`legacy_te_proj/`)

@@ -1,0 +1,24 @@
+{
+  "name": "coastvision-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
+    "@mui/icons-material": "^6.2.0",
+    "@mui/material": "^6.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-zoom-pan-pinch": "^3.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.8"
+  }
+}

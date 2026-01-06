@@ -4,15 +4,36 @@
 venv/
 .venv/
 
-# ==============================
-# Datasets & Training Outputs
-# ==============================
-dataset/
-runs/
-*.pt
+# VS Code local settings
+.vscode/
 
 # ==============================
-# Python Cache
+# DATASETS & TRAINING OUTPUTS
+# ==============================
+data/
+dataset/
+runs/
+weights/
+logs/
+
+# External/vendor repos (keeps Source Control clean)
+yolov5/
+YOLOv8/
+
+results.csv
+events.out.tfevents*
+
+# Model weights / exported models (keep local, don't commit)
+*.pt
+*.onnx
+*.engine
+*.tflite
+
+# Ignore YOLO label files inside dataset
+dataset/**/*.txt
+
+# ==============================
+# PYTHON CACHE
 # ==============================
 __pycache__/
 *.pyc
@@ -20,31 +41,69 @@ __pycache__/
 *.pyd
 
 # ==============================
-# Jupyter
+# JUPYTER
 # ==============================
 .ipynb_checkpoints/
 
 # ==============================
-# Environment Files
+# ENV FILES
 # ==============================
 .env
 
 # ==============================
-# OS Files
+# OS FILES
 # ==============================
 .DS_Store
 Thumbs.db
 
 # ==============================
-# Frontend/Dashboard
+# FRONTEND / DASHBOARD
 # ==============================
-frontend/dashboard/uploads/
-frontend/dashboard/*.db
-frontend/dashboard/.streamlit/
-frontend/TE PROJ/uploads/
-frontend/TE PROJ/*.db
-frontend/TE PROJ/__pycache__/
-frontend/TE PROJ/instance/
-frontend/TE PROJ/.pytest_cache/
-frontend/TE PROJ/static/output/
-frontend/TE PROJ/static/temp/
+frontend/**/uploads/
+frontend/**/*.db
+frontend/**/.streamlit/
+frontend/**/__pycache__/
+frontend/**/instance/
+frontend/**/.pytest_cache/
+frontend/**/static/output/
+frontend/**/static/temp/
+
+# Frontend build/cache (avoid 10k-file diffs)
+frontend/web/node_modules/
+frontend/web/dist/
+frontend/web/.vite/
+frontend/web/.eslintcache
+frontend/web/.parcel-cache/
+frontend/web/.turbo/
+frontend/web/.next/
+
+# Prototype assets / generated artifacts
+frontend/dashboard/videos/
+frontend/dashboard/models/
+frontend/dashboard/alerts.csv
+frontend/dashboard/exported_alerts.csv
+legacy_te_proj/alerts.csv
+legacy_te_proj/exported_alerts.csv
+legacy_te_proj/alert_images/
+legacy_te_proj/alerts/
+legacy_te_proj/snapshots/
+
+# Videos / images (generated or large assets)
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+
+# Legacy weights copied into legacy folder
+frontend/legacy_te_proj/**/*.pt
+
+# Python cache (ensure both backend/frontend)
+backend/__pycache__/
+frontend/__pycache__/
+
+# Logs/temp
+*.log
+*.tmp
