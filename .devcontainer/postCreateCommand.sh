@@ -39,12 +39,17 @@ mkdir -p frontend/dashboard/models
 # Download a lightweight YOLO model for demo (CPU-friendly)
 echo "Downloading YOLOv8 nano model for CPU usage..."
 if [ ! -f models/yolov8n.pt ]; then
-    python -c "from ultralytics import YOLO; model = YOLO('yolov8n.pt'); import shutil; shutil.move('yolov8n.pt', 'models/yolov8n.pt')"
+    python -c "
+from ultralytics import YOLO
+import shutil
+model = YOLO('yolov8n.pt')
+shutil.move('yolov8n.pt', 'models/yolov8n.pt')
+"
 fi
 
 # Copy model to frontend dashboard if it doesn't exist
-if [ ! -f frontend/dashboard/models/yolov8n.pt ]; then
-    cp models/yolov8n.pt frontend/dashboard/models/yolov8n.pt 2>/dev/null || true
+if [ ! -f frontend/dashboard/models/yolov8n.pt ] && [ -f models/yolov8n.pt ]; then
+    cp models/yolov8n.pt frontend/dashboard/models/yolov8n.pt
 fi
 
 # Create sample video placeholder info

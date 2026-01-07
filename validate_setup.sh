@@ -13,21 +13,21 @@ ERRORS=0
 
 # Check Python
 echo "🔍 Checking Python..."
-if python --version 2>&1 | grep -q "3\."; then
+if python --version 2>&1 | grep -qE "3\.1[1-9]"; then
     echo "✅ Python: $(python --version)"
 else
-    echo "❌ Python not found or wrong version"
+    echo "❌ Python not found or wrong version (expected 3.11+)"
     ERRORS=$((ERRORS + 1))
 fi
 echo ""
 
 # Check Node.js
 echo "🔍 Checking Node.js..."
-if node --version 2>&1 | grep -q "v"; then
+if node --version 2>&1 | grep -qE "v2[0-9]\."; then
     echo "✅ Node.js: $(node --version)"
     echo "✅ npm: $(npm --version)"
 else
-    echo "❌ Node.js not found"
+    echo "❌ Node.js not found or wrong version (expected 20.x)"
     ERRORS=$((ERRORS + 1))
 fi
 echo ""
