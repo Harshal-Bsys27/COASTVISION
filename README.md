@@ -1,5 +1,9 @@
 # CoastVision: AI-Powered Beach Surveillance System
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Harshal-Bsys27/COASTVISION?quickstart=1)
+
+**Quick Start**: Click the badge above to run this project instantly in your browser with zero setup!
+
 ## Project Overview
 CoastVision detects people in water, flags possible drowning behavior, and surfaces alerts for lifeguards. A PyQt desktop dashboard shows six zones with zoomable popouts and alerts. Future work: Android app for lifeguard notifications.
 
