@@ -289,77 +289,77 @@ def _append_alert_row(row):
 
 
 def _annotate(frame, zid: int):
-	# IMPORTANT: serialize GPU inference across threads
-	with _INFER_LOCK:
-		results = MODEL.predict(
-			frame,
-			verbose=False,
-			conf=CONF_THRES,
+    # IMPORTANT: serialize GPU inference across threads
+    with _INFER_LOCK:
+        results = MODEL.predict(
+            frame,
+            verbose=False,
+            conf=CONF_THRES,
             iou=COASTVISION_IOU,
             max_det=COASTVISION_MAX_DET,
-			device=PREDICT_DEVICE,
-			imgsz=COASTVISION_IMGSZ,
-			half=(COASTVISION_HALF and str(DEVICE).startswith("cuda")),
-		)
+            device=PREDICT_DEVICE,
+            imgsz=COASTVISION_IMGSZ,
+            half=(COASTVISION_HALF and str(DEVICE).startswith("cuda")),
+        )
 
-	alerts = []
-	dets: List[Dict[str, Any]] = []
-	names = MODEL.names
-	h, w = frame.shape[:2]
+    alerts = []
+    dets: List[Dict[str, Any]] = []
+    names = MODEL.names
+    h, w = frame.shape[:2]
 
-	# 1) Person detections (if enabled) to ensure every person gets its own box
-	if PERSON_MODEL is not None:
-		try:
-			with _INFER_LOCK:
-				pres = PERSON_MODEL.predict(
-					frame,
-					verbose=False,
-					conf=PERSON_CONF_THRES,
+    # 1) Person detections (if enabled) to ensure every person gets its own box
+    if PERSON_MODEL is not None:
+        try:
+            with _INFER_LOCK:
+                pres = PERSON_MODEL.predict(
+                    frame,
+                    verbose=False,
+                    conf=PERSON_CONF_THRES,
                     iou=COASTVISION_IOU,
                     max_det=COASTVISION_MAX_DET,
-					device=PREDICT_DEVICE,
-					imgsz=COASTVISION_IMGSZ,
-					classes=[0],
-					half=(COASTVISION_HALF and str(DEVICE).startswith("cuda")),
-				)
-			for pr in pres:
-				for box in pr.boxes:
-					conf = float(box.conf[0]) if box.conf is not None else 0.0
-					x1, y1, x2, y2 = map(int, box.xyxy[0])
-					dets.append({
-						"bbox": [x1, y1, x2, y2],
-						"label": "person",
-						"conf": conf,
-						"color": (0, 220, 0),
-					})
-		except Exception:
-			# don't break video if person model fails
-			pass
+                    device=PREDICT_DEVICE,
+                    imgsz=COASTVISION_IMGSZ,
+                    classes=[0],
+                    half=(COASTVISION_HALF and str(DEVICE).startswith("cuda")),
+                )
+            for pr in pres:
+                for box in pr.boxes:
+                    conf = float(box.conf[0]) if box.conf is not None else 0.0
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    dets.append({
+                        "bbox": [x1, y1, x2, y2],
+                        "label": "person",
+                        "conf": conf,
+                        "color": (0, 220, 0),
+                    })
+        except Exception:
+            # don't break video if person model fails
+            pass
 
-	# 2) Main model detections (drowning/emergency etc)
-	for r in results:
-		for box in r.boxes:
-			cls = int(box.cls[0]) if box.cls is not None else -1
-			conf = float(box.conf[0]) if box.conf is not None else 0.0
-			label = names.get(cls, f"class_{cls}") if isinstance(names, dict) else str(cls)
-			x1, y1, x2, y2 = map(int, box.xyxy[0])
-			x1 = max(0, min(w - 1, x1))
-			y1 = max(0, min(h - 1, y1))
-			x2 = max(0, min(w - 1, x2))
-			y2 = max(0, min(h - 1, y2))
+    # 2) Main model detections (drowning/emergency etc)
+    for r in results:
+        for box in r.boxes:
+            cls = int(box.cls[0]) if box.cls is not None else -1
+            conf = float(box.conf[0]) if box.conf is not None else 0.0
+            label = names.get(cls, f"class_{cls}") if isinstance(names, dict) else str(cls)
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            x1 = max(0, min(w - 1, x1))
+            y1 = max(0, min(h - 1, y1))
+            x2 = max(0, min(w - 1, x2))
+            y2 = max(0, min(h - 1, y2))
 
-			# High-contrast styling for readability
-			label_l = str(label).lower()
-			# Requested style: green for normal, orange for drowning/emergency.
-			if COASTVISION_OVERLAY_STYLE in {"green", "pro"}:
-				color = (0, 220, 0)  # bright green (BGR)
-				if "drown" in label_l or "emerg" in label_l:
-					color = (0, 165, 255)  # orange (BGR)
-			else:
-				# fallback
-				color = (0, 220, 0)
+            # High-contrast styling for readability
+            label_l = str(label).lower()
+            # Requested style: green for normal, orange for drowning/emergency.
+            if COASTVISION_OVERLAY_STYLE in {"green", "pro"}:
+                color = (0, 220, 0)  # bright green (BGR)
+                if "drown" in label_l or "emerg" in label_l:
+                    color = (0, 165, 255)  # orange (BGR)
+            else:
+                # fallback
+                color = (0, 220, 0)
 
-			det = {"bbox": [x1, y1, x2, y2], "label": label, "conf": conf, "color": color}
+            det = {"bbox": [x1, y1, x2, y2], "label": label, "conf": conf, "color": color}
             dets.append(det)
             # For project context: keep overlays flexible, but make ALERTS stricter to reduce false alarms.
             if conf >= COASTVISION_ALERT_CONF and ((ALERT_CLASSES is None) or (str(label).lower() in ALERT_CLASSES)):
@@ -371,8 +371,8 @@ def _annotate(frame, zid: int):
                     "bbox": [x1, y1, x2, y2],
                     "msg": f"{label} detected",
                 })
-	_draw_detections(frame, dets)
-	return frame, alerts, dets
+    _draw_detections(frame, dets)
+    return frame, alerts, dets
 
 
 def _record_alerts(alerts):

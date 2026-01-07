@@ -46,6 +46,41 @@ function usePollJson(url, ms, enabled, initial) {
   return data;
 }
 
+function usePollJsonWithOk(url, ms, enabled, initial) {
+  const [data, setData] = useState(initial);
+  const [ok, setOk] = useState(null); // null | true | false
+
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    const ctrl = new AbortController();
+
+    const tick = async () => {
+      try {
+        const r = await fetch(url, { signal: ctrl.signal });
+        if (!r.ok) throw new Error("bad_status");
+        const j = await r.json();
+        if (!alive) return;
+        setData(j);
+        setOk(true);
+      } catch {
+        if (!alive) return;
+        setOk(false);
+      }
+    };
+
+    tick();
+    const t = setInterval(tick, ms);
+    return () => {
+      alive = false;
+      ctrl.abort();
+      clearInterval(t);
+    };
+  }, [url, ms, enabled]);
+
+  return { data, ok };
+}
+
 export default function App() {
   const zones = useMemo(() => Array.from({ length: 6 }, (_, i) => i + 1), []);
   const [tab, setTab] = useState(0);
@@ -195,6 +230,12 @@ export default function App() {
     alerts_by_label: {},
   });
 
+  const { data: health, ok: backendOk } = usePollJsonWithOk(`${API}/api/health`, 2000, true, {
+    status: "unknown",
+    device: "?",
+    model_names: [],
+  });
+
   const modalAlerts = usePollJson(
     openZone ? `${API}/api/alerts?zone=${openZone}&limit=40` : `${API}/api/alerts?limit=1`,
     900,
@@ -262,12 +303,59 @@ export default function App() {
           <Typography variant="h6" sx={{ fontWeight: 800, letterSpacing: 0.5 }}>
             CoastVision
           </Typography>
+
+          <Chip
+            label={backendOk === false ? "Backend: Offline" : backendOk === true ? "Backend: Online" : "Backend: …"}
+            size="small"
+            sx={{
+              bgcolor: backendOk === false ? "rgba(255,90,90,.14)" : "rgba(46,230,255,.12)",
+              color: backendOk === false ? "rgba(255,120,120,1)" : "#2ee6ff",
+              fontWeight: 800,
+            }}
+          />
+
+          <Chip
+            label={`Device: ${health?.device ?? "?"}`}
+            size="small"
+            sx={{ bgcolor: "rgba(46,230,255,.08)", color: "rgba(231,238,252,.92)", fontWeight: 800 }}
+          />
+
           <Chip
             label={`Alerts: ${analysis.alerts_total ?? 0}`}
             size="small"
             sx={{ bgcolor: "rgba(46,230,255,.12)", color: "#2ee6ff" }}
           />
+
+          {Array.isArray(health?.model_names) && health.model_names.length > 0 && (
+            <Chip
+              label={`Model: ${health.model_names.join(" • ")}`}
+              size="small"
+              sx={{
+                bgcolor: "rgba(46,230,255,.06)",
+                color: "rgba(231,238,252,.85)",
+                fontWeight: 800,
+                maxWidth: 520,
+              }}
+            />
+          )}
+
           <Box sx={{ flex: 1 }} />
+
+          <Button
+            variant="outlined"
+            onClick={() => {
+              setStreamDisabled({});
+              setImgErr({});
+            }}
+            sx={{
+              borderColor: "rgba(46,230,255,.22)",
+              color: "rgba(231,238,252,.9)",
+              fontWeight: 900,
+            }}
+          >
+            Reset Streams
+          </Button>
+
           <Button
             variant={paused ? "outlined" : "contained"}
             startIcon={paused ? <PlayArrowIcon /> : <PauseIcon />}

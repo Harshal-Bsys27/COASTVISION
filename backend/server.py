@@ -29,7 +29,21 @@ VIDEO_DIR_CANDIDATES = [
     (ROOT / ".." / "data" / "raw_videos"),
 ]
 
-ZONE_IDS = list(range(1, 7))
+
+import re
+
+def _find_zone_ids(video_dir: Path) -> list:
+    """Return sorted list of all zone IDs (ints) for zone*.mp4 in the video dir."""
+    ids = set()
+    for p in video_dir.glob("zone*.mp4"):
+        m = re.match(r"zone(\d+)\.mp4", p.name, re.IGNORECASE)
+        if m:
+            ids.add(int(m.group(1)))
+    return sorted(ids)
+
+ZONE_IDS = _find_zone_ids(
+    Path(_VIDEO_DIR_ENV) if _VIDEO_DIR_ENV else (ROOT / ".." / "frontend" / "dashboard" / "videos")
+)
 
 # Detection
 CONF_THRES = float(os.environ.get("COASTVISION_CONF", "0.35"))
@@ -149,6 +163,32 @@ try:
             print("[warn] COASTVISION_ENABLE_PERSON_DET=1 but no yolov8n.pt/yolo11n.pt found for person detection")
 except Exception as e:
     print(f"[warn] Person model init failed: {type(e).__name__}: {e}")
+
+
+def _names_to_list(names_obj) -> List[str]:
+    """Return a stable list of class names for debugging/health."""
+    try:
+        if isinstance(names_obj, dict):
+            out: List[str] = []
+            for k in sorted(names_obj.keys()):
+                out.append(str(names_obj[k]))
+            return out
+        if isinstance(names_obj, list):
+            return [str(x) for x in names_obj]
+    except Exception:
+        pass
+    return []
+
+
+def _cls_to_label(names_obj, cls: int) -> str:
+    """Map a class id to a readable label for both dict and list name formats."""
+    if isinstance(names_obj, dict):
+        return str(names_obj.get(cls, f"class_{cls}"))
+    if isinstance(names_obj, list):
+        if 0 <= cls < len(names_obj):
+            return str(names_obj[cls])
+        return f"class_{cls}"
+    return f"class_{cls}"
 
 
 # ----------------- HELPERS -----------------
@@ -273,8 +313,11 @@ VIDEO_PATHS: Dict[int, Path] = {}
 _zones: Dict[int, ZoneState] = {}
 
 
+
 def _open_zone_caps():
     VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    global ZONE_IDS
+    ZONE_IDS = _find_zone_ids(VIDEO_DIR)
     for zid in ZONE_IDS:
         p = VIDEO_DIR / f"zone{zid}.mp4"
         VIDEO_PATHS[zid] = p
@@ -385,7 +428,7 @@ def _annotate(frame, zid: int):
         for box in r.boxes:
             cls = int(box.cls[0]) if box.cls is not None else -1
             conf = float(box.conf[0]) if box.conf is not None else 0.0
-            label = names.get(cls, f"class_{cls}") if isinstance(names, dict) else str(cls)
+            label = _cls_to_label(names, cls)
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             x1 = max(0, min(w - 1, x1))
             y1 = max(0, min(h - 1, y1))
@@ -500,6 +543,8 @@ def health():
             "status": "ok",
             "device": DEVICE,
             "model_path": str(MODEL_PATH),
+            "model_names": _names_to_list(MODEL.names),
+            "person_model_loaded": bool(PERSON_MODEL is not None),
             "zones": len(_zones),
             "alerts_cached": len(ALERT_HISTORY),
             "conf": CONF_THRES,
@@ -516,7 +561,29 @@ def health():
 
 
 @app.route("/api/zones", methods=["GET"])
+
 def zones():
+    # Always rescan for new zone*.mp4 files before reporting zones
+    global ZONE_IDS
+    ZONE_IDS = _find_zone_ids(VIDEO_DIR)
+    for zid in ZONE_IDS:
+        if zid not in VIDEO_PATHS:
+            p = VIDEO_DIR / f"zone{zid}.mp4"
+            VIDEO_PATHS[zid] = p
+            if p.exists():
+                cap = _open_capture(p)
+                if cap:
+                    _zones[zid] = ZoneState(zid=zid, path=p, cap=cap, lock=threading.Lock())
+    # Remove zones for deleted videos
+    for zid in list(VIDEO_PATHS.keys()):
+        if zid not in ZONE_IDS:
+            VIDEO_PATHS.pop(zid, None)
+            zs = _zones.pop(zid, None)
+            if zs and zs.cap:
+                try:
+                    zs.cap.release()
+                except Exception:
+                    pass
     items = []
     now = time.time()
     for zid, p in VIDEO_PATHS.items():
@@ -533,6 +600,12 @@ def zones():
             }
         )
     return jsonify({"items": items})
+
+# Optional: endpoint to force reload all videos (for UI button)
+@app.route("/api/zones/reload", methods=["POST"])
+def reload_zones():
+    _open_zone_caps()
+    return jsonify({"ok": True, "zones": [z for z in ZONE_IDS]})
 
 
 @app.route("/api/zones/<int:zid>/frame.jpg", methods=["GET"])
