@@ -6,6 +6,8 @@ import csv
 import os
 import threading
 import time
+import sys
+import platform
 from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +20,77 @@ import torch
 from flask import Flask, Response, abort, jsonify, request
 from flask_cors import CORS
 from ultralytics import YOLO
+
+# --- NEW: GPU perf toggles (safe for RTX 3050) ---
+COASTVISION_TF32 = os.environ.get("COASTVISION_TF32", "1").strip().lower() not in {"0", "false", "no"}
+COASTVISION_CUDNN_BENCHMARK = os.environ.get("COASTVISION_CUDNN_BENCHMARK", "1").strip().lower() not in {"0", "false", "no"}
+
+# NEW: if set, backend will refuse to start unless CUDA is usable
+COASTVISION_REQUIRE_CUDA = os.environ.get("COASTVISION_REQUIRE_CUDA", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+# Disable autograd globally for inference server
+try:
+    torch.set_grad_enabled(False)
+except Exception:
+    pass
+
+if torch.cuda.is_available():
+    try:
+        if COASTVISION_CUDNN_BENCHMARK:
+            torch.backends.cudnn.benchmark = True
+    except Exception:
+        pass
+    try:
+        if COASTVISION_TF32:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
+# NEW: CUDA smoke test (catches "CUDA available but broken driver/runtime" cases)
+CUDA_SMOKE_OK: bool = False
+CUDA_SMOKE_ERROR: Optional[str] = None
+
+def _cuda_smoke_test() -> tuple[bool, Optional[str]]:
+    try:
+        if not torch.cuda.is_available():
+            return False, "torch.cuda.is_available() is False (CPU-only torch or no CUDA runtime)"
+        # init + tiny allocation
+        torch.cuda.init()
+        _ = torch.empty((1,), device="cuda")
+        torch.cuda.synchronize()
+        return True, None
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _torch_cuda_build_info() -> dict:
+    # Torch can be installed without CUDA support (torch.version.cuda == None)
+    built_cuda = getattr(torch.version, "cuda", None) is not None
+    try:
+        device_count = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
+    except Exception:
+        device_count = None
+
+    names = []
+    if torch.cuda.is_available():
+        try:
+            for i in range(int(device_count or 0)):
+                names.append(torch.cuda.get_device_name(i))
+        except Exception:
+            pass
+
+    return {
+        "torch_built_with_cuda": bool(built_cuda),
+        "torch_cuda_version": getattr(torch.version, "cuda", None),
+        "torch_cuda_available": bool(torch.cuda.is_available()),
+        "torch_cuda_device_count": device_count,
+        "torch_cuda_device_names": names,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "nvidia_visible_devices": os.environ.get("NVIDIA_VISIBLE_DEVICES"),
+    }
 
 # ----------------- CONFIG -----------------
 ROOT = Path(__file__).resolve().parent
@@ -58,6 +131,10 @@ COASTVISION_MAX_SIDE = int(os.environ.get("COASTVISION_MAX_SIDE", "1280"))
 COASTVISION_FPS = int(os.environ.get("COASTVISION_FPS", "10"))
 COASTVISION_INFER_EVERY = int(os.environ.get("COASTVISION_INFER_EVERY", "2"))
 COASTVISION_IMGSZ = int(os.environ.get("COASTVISION_IMGSZ", "640"))
+
+# Grid playback: serve a smaller cached JPEG to reduce bandwidth and stutter
+COASTVISION_GRID_MAX_W = int(os.environ.get("COASTVISION_GRID_MAX_W", "640"))
+COASTVISION_GRID_JPEG_QUALITY = int(os.environ.get("COASTVISION_GRID_JPEG_QUALITY", "72"))
 
 COASTVISION_DEVICE = os.environ.get("COASTVISION_DEVICE", "").strip()
 COASTVISION_ALERT_COOLDOWN_S = float(os.environ.get("COASTVISION_ALERT_COOLDOWN_S", "4"))
@@ -124,16 +201,39 @@ def _pick_person_model_path() -> Optional[Path]:
 
 
 MODEL_PATH = _pick_model_path()
+
 _cuda_available = bool(torch.cuda.is_available())
-if COASTVISION_DEVICE:
-    DEVICE = COASTVISION_DEVICE
+
+REQUESTED_DEVICE = COASTVISION_DEVICE or ("cuda:0" if _cuda_available else "cpu")
+
+# Decide effective device + run smoke test before loading YOLO
+if str(REQUESTED_DEVICE).startswith("cuda"):
+    ok, err = _cuda_smoke_test()
+    CUDA_SMOKE_OK, CUDA_SMOKE_ERROR = ok, err
+    if not ok:
+        build_info = _torch_cuda_build_info()
+        msg = (
+            "[init][GPU] Requested CUDA but CUDA smoke test failed.\n"
+            f"[init][GPU] torch_built_with_cuda={build_info.get('torch_built_with_cuda')} "
+            f"torch_version={getattr(torch,'__version__','?')} torch_cuda_version={build_info.get('torch_cuda_version')}\n"
+            f"[init][GPU] smoke_error={err}\n"
+            "[init][GPU] Fix: install CUDA-enabled torch in THIS python/venv (python -m pip ... cu121), "
+            "and ensure NVIDIA driver works (nvidia-smi)."
+        )
+        if COASTVISION_REQUIRE_CUDA:
+            raise RuntimeError(msg)
+        print(msg + " Falling back to CPU.")
+        DEVICE = "cpu"
+    else:
+        DEVICE = REQUESTED_DEVICE
 else:
-    DEVICE = "cuda:0" if _cuda_available else "cpu"
+    DEVICE = REQUESTED_DEVICE
 
 # Ultralytics expects device=0 for cuda:0
-PREDICT_DEVICE = 0 if (str(DEVICE).startswith("cuda") and _cuda_available) else "cpu"
+PREDICT_DEVICE = 0 if (str(DEVICE).startswith("cuda") and bool(torch.cuda.is_available())) else "cpu"
 
-print(f"[init] Loading model from {MODEL_PATH} on {DEVICE} (predict_device={PREDICT_DEVICE})")
+print(f"[init] Requested device={REQUESTED_DEVICE} | Effective device={DEVICE} | predict_device={PREDICT_DEVICE}")
+print(f"[init] Loading model from {MODEL_PATH} on {DEVICE}")
 MODEL = YOLO(str(MODEL_PATH)).to(DEVICE)
 try:
     MODEL.fuse()
@@ -215,9 +315,19 @@ VIDEO_DIR = _find_video_dir()
 
 
 def _open_capture(path: Path) -> Optional[cv2.VideoCapture]:
-    cap = cv2.VideoCapture(str(path))
+    # Prefer FFMPEG on Windows for MP4 stability
+    cap = cv2.VideoCapture(str(path), cv2.CAP_FFMPEG)
     if not cap.isOpened():
+        cap.release()
+        cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        cap.release()
         return None
+    try:
+        # reduce decode buffering / latency
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
     return cap
 
 
@@ -301,6 +411,7 @@ class ZoneState:
     cap: cv2.VideoCapture
     lock: threading.Lock
     last_jpeg: Optional[bytes] = None
+    last_jpeg_grid: Optional[bytes] = None
     last_ts: float = 0.0
     last_error: Optional[str] = None
     frame_i: int = 0
@@ -311,6 +422,7 @@ class ZoneState:
 
 VIDEO_PATHS: Dict[int, Path] = {}
 _zones: Dict[int, ZoneState] = {}
+_zone_threads: Dict[int, threading.Thread] = {}
 
 
 
@@ -324,11 +436,26 @@ def _open_zone_caps():
         if not p.exists():
             print(f"[warn] Missing video for zone {zid}: {p}")
             continue
+        # Keep existing zone if it is already active.
+        if zid in _zones:
+            continue
         cap = _open_capture(p)
         if not cap:
             print(f"[warn] Could not open video for zone {zid}: {p}")
             continue
         _zones[zid] = ZoneState(zid=zid, path=p, cap=cap, lock=threading.Lock())
+
+
+def _ensure_zone_thread(zid: int):
+    if zid in _zone_threads:
+        return
+    st = _zones.get(zid)
+    if not st:
+        return
+    th = threading.Thread(target=_zone_worker, args=(zid,), daemon=True)
+    th.start()
+    _zone_threads[zid] = th
+    print(f"[zones] Started worker for zone {zid}")
 
 
 def _record_alerts(alerts):
@@ -468,6 +595,9 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
     st = _zones[zid]
 
     while True:
+        # If the zone was removed (video deleted), stop this worker.
+        if zid not in _zones:
+            break
         t0 = time.time()
         try:
             with st.lock:
@@ -497,6 +627,28 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
                     ok2, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
                     if ok2:
                         st.last_jpeg = jpg.tobytes()
+
+                        # Cache a smaller JPEG for the grid to keep 12+ zones smooth.
+                        try:
+                            gf = frame
+                            gh, gw = gf.shape[:2]
+                            if COASTVISION_GRID_MAX_W > 0 and gw > COASTVISION_GRID_MAX_W:
+                                scale = COASTVISION_GRID_MAX_W / float(gw)
+                                gf = cv2.resize(
+                                    gf,
+                                    (int(gw * scale), int(gh * scale)),
+                                    interpolation=cv2.INTER_AREA,
+                                )
+                            okg, jpg_g = cv2.imencode(
+                                ".jpg",
+                                gf,
+                                [int(cv2.IMWRITE_JPEG_QUALITY), COASTVISION_GRID_JPEG_QUALITY],
+                            )
+                            if okg:
+                                st.last_jpeg_grid = jpg_g.tobytes()
+                        except Exception:
+                            pass
+
                         st.last_ts = time.time()
                         st.last_error = None
                 else:
@@ -506,6 +658,8 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
 
         dt = time.time() - t0
         time.sleep(max(0.0, interval - dt))
+
+    _zone_threads.pop(zid, None)
 
 
 # ----------------- API (Flask) -----------------
@@ -525,9 +679,7 @@ def _start_workers_once():
             return
         _open_zone_caps()
         for zid in list(_zones.keys()):
-            th = threading.Thread(target=_zone_worker, args=(zid,), daemon=True)
-            th.start()
-            print(f"[init] Started worker for zone {zid}")
+            _ensure_zone_thread(zid)
         _workers_started = True
 
 
@@ -538,13 +690,37 @@ def _ensure_started():
 
 @app.route("/api/health", methods=["GET"])
 def health():
+    gpu_name = None
+    gpu_vram_gb = None
+    if torch.cuda.is_available():
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+        except Exception:
+            gpu_name = None
+        try:
+            props = torch.cuda.get_device_properties(0)
+            gpu_vram_gb = round(float(props.total_memory) / (1024 ** 3), 2)
+        except Exception:
+            gpu_vram_gb = None
+
+    cuda_info = _torch_cuda_build_info()
+
     return jsonify(
         {
             "status": "ok",
-            "device": DEVICE,
-            "model_path": str(MODEL_PATH),
-            "model_names": _names_to_list(MODEL.names),
-            "person_model_loaded": bool(PERSON_MODEL is not None),
+            "python_executable": sys.executable,
+            "python_version": sys.version.split()[0],
+            "platform": platform.platform(),
+            "requested_device": str(REQUESTED_DEVICE),
+            "device": str(DEVICE),
+            # NEW: definitive CUDA build/runtime info
+            **cuda_info,
+            "gpu_name": gpu_name,
+            "gpu_vram_gb": gpu_vram_gb,
+            "cuda_smoke_ok": bool(CUDA_SMOKE_OK),
+            "cuda_smoke_error": CUDA_SMOKE_ERROR,
+            "cudnn_benchmark": getattr(torch.backends.cudnn, "benchmark", None),
+            "tf32_matmul": getattr(torch.backends.cuda.matmul, "allow_tf32", None) if torch.cuda.is_available() else None,
             "zones": len(_zones),
             "alerts_cached": len(ALERT_HISTORY),
             "conf": CONF_THRES,
@@ -574,6 +750,7 @@ def zones():
                 cap = _open_capture(p)
                 if cap:
                     _zones[zid] = ZoneState(zid=zid, path=p, cap=cap, lock=threading.Lock())
+                    _ensure_zone_thread(zid)
     # Remove zones for deleted videos
     for zid in list(VIDEO_PATHS.keys()):
         if zid not in ZONE_IDS:
@@ -584,6 +761,7 @@ def zones():
                     zs.cap.release()
                 except Exception:
                     pass
+            _zone_threads.pop(zid, None)
     items = []
     now = time.time()
     for zid, p in VIDEO_PATHS.items():
@@ -605,6 +783,8 @@ def zones():
 @app.route("/api/zones/reload", methods=["POST"])
 def reload_zones():
     _open_zone_caps()
+    for zid in list(_zones.keys()):
+        _ensure_zone_thread(zid)
     return jsonify({"ok": True, "zones": [z for z in ZONE_IDS]})
 
 
@@ -613,11 +793,15 @@ def zone_frame(zid: int):
     st = _zones.get(zid)
     if not st:
         jpg = _placeholder_jpeg(f"Zone {zid} unavailable", "Video file missing or cannot open")
-        return Response(jpg, mimetype="image/jpeg")
+        return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
     if st.last_jpeg is None:
         jpg = _placeholder_jpeg(f"Zone {zid}", "Loading frames...")
-        return Response(jpg, mimetype="image/jpeg")
-    return Response(st.last_jpeg, mimetype="image/jpeg")
+        return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+    w = request.args.get("w", "").strip()
+    if w:
+        jpg = st.last_jpeg_grid or st.last_jpeg
+        return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+    return Response(st.last_jpeg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.route("/api/zones/<int:zid>/stream.mjpg", methods=["GET"])
@@ -648,7 +832,11 @@ def zone_stream(zid: int):
                 pass
             time.sleep(frame_interval_s)
 
-    return Response(gen(), mimetype=f"multipart/x-mixed-replace; boundary={boundary}")
+    return Response(
+        gen(),
+        mimetype=f"multipart/x-mixed-replace; boundary={boundary}",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.route("/api/zones/<int:zid>/detections", methods=["GET"])
