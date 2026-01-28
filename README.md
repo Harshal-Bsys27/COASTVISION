@@ -1,6 +1,10 @@
 # CoastVision: AI-Powered Beach Surveillance System
 ( Currently In Progress )
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Harshal-Bsys27/COASTVISION?quickstart=1)
+
+**Quick Start**: Click the badge above to run this project instantly in your browser with zero setup!
+
 ## Project Overview
 CoastVision detects people in water, flags possible drowning behavior, and surfaces alerts for lifeguards. A PyQt desktop dashboard shows six zones with zoomable popouts and alerts. Future work: Android app for lifeguard notifications.
 
@@ -16,7 +20,52 @@ CoastVision detects people in water, flags possible drowning behavior, and surfa
 - Roboflow / LabelImg for annotation
 - Training on Colab or local GPU (RTX-class recommended)
 
-## Getting Started
+## 🚀 Quick Start with GitHub Codespaces (No Setup Required!)
+
+**Run this project instantly in your browser without any local setup:**
+
+1. Click the **Code** button on GitHub
+2. Select **Codespaces** tab
+3. Click **Create codespace on main** (or your branch)
+4. Wait for the environment to build (3-5 minutes first time)
+5. Once ready, run one command:
+   ```bash
+   ./start_all.sh
+   ```
+6. Open the forwarded ports (VS Code will notify you):
+   - Backend API: `http://localhost:8000`
+   - Frontend Dashboard: `http://localhost:5173`
+
+**That's it! No dependencies, no Python setup, no Node.js installation needed!**
+
+### Codespaces Features
+- ✅ **Zero Setup**: Pre-configured with Python, Node.js, and all dependencies
+- ✅ **CPU Mode**: Optimized for CPU inference (no GPU required)
+- ✅ **Auto-Install**: Dependencies installed automatically
+- ✅ **Sample Model**: YOLOv8n model downloaded automatically
+- ✅ **Port Forwarding**: Automatic port forwarding for backend and frontend
+- ✅ **VS Code Extensions**: Pre-installed Python and JavaScript extensions
+
+### Codespaces Commands
+```bash
+# Start both backend and frontend
+./start_all.sh
+
+# Or start them separately:
+./start_backend.sh    # Backend only (port 8000)
+./start_frontend.sh   # Frontend only (port 5173)
+```
+
+### Codespaces Notes
+- The environment runs in **CPU mode** (Codespaces doesn't provide GPU)
+- Performance is optimized for CPU inference
+- Sample video files can be placed in `frontend/dashboard/videos/`
+- Without videos, placeholder frames are shown
+- Free tier: 60 hours/month for 2-core instances
+
+---
+
+## Getting Started (Local Development)
 ```bash
 git clone https://github.com/yourusername/coastvision.git
 pip install -r requirements.txt
