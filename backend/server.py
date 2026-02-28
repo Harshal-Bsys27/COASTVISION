@@ -126,15 +126,15 @@ COASTVISION_MAX_DET = int(os.environ.get("COASTVISION_MAX_DET", "200"))
 # Alerts are stricter than overlays (helps precision for drowning/emergency)
 COASTVISION_ALERT_CONF = float(os.environ.get("COASTVISION_ALERT_CONF", "0.55"))
 
-# Performance
+# Performance (optimized for smooth playback with RTX 3050)
 COASTVISION_MAX_SIDE = int(os.environ.get("COASTVISION_MAX_SIDE", "1280"))
-COASTVISION_FPS = int(os.environ.get("COASTVISION_FPS", "10"))
-COASTVISION_INFER_EVERY = int(os.environ.get("COASTVISION_INFER_EVERY", "2"))
-COASTVISION_IMGSZ = int(os.environ.get("COASTVISION_IMGSZ", "640"))
+COASTVISION_FPS = int(os.environ.get("COASTVISION_FPS", "30"))  # Increased from 10 to 30 for smooth video
+COASTVISION_INFER_EVERY = int(os.environ.get("COASTVISION_INFER_EVERY", "3"))  # Increased from 2 to 3 (run inference every 3 frames for efficiency)
+COASTVISION_IMGSZ = int(os.environ.get("COASTVISION_IMGSZ", "640"))  # Optimal for YOLOv8
 
 # Grid playback: serve a smaller cached JPEG to reduce bandwidth and stutter
 COASTVISION_GRID_MAX_W = int(os.environ.get("COASTVISION_GRID_MAX_W", "640"))
-COASTVISION_GRID_JPEG_QUALITY = int(os.environ.get("COASTVISION_GRID_JPEG_QUALITY", "72"))
+COASTVISION_GRID_JPEG_QUALITY = int(os.environ.get("COASTVISION_GRID_JPEG_QUALITY", "75"))  # Improved from 72 for better quality
 
 COASTVISION_DEVICE = os.environ.get("COASTVISION_DEVICE", "").strip()
 COASTVISION_ALERT_COOLDOWN_S = float(os.environ.get("COASTVISION_ALERT_COOLDOWN_S", "4"))
