@@ -128,17 +128,17 @@ COASTVISION_ALERT_CONF = float(os.environ.get("COASTVISION_ALERT_CONF", "0.55"))
 
 # Performance (optimized for smooth playback with RTX 3050)
 COASTVISION_MAX_SIDE = int(os.environ.get("COASTVISION_MAX_SIDE", "1280"))
-COASTVISION_FPS = int(os.environ.get("COASTVISION_FPS", "30"))  # Increased from 10 to 30 for smooth video
-COASTVISION_INFER_EVERY = int(os.environ.get("COASTVISION_INFER_EVERY", "3"))  # Increased from 2 to 3 (run inference every 3 frames for efficiency)
+COASTVISION_FPS = int(os.environ.get("COASTVISION_FPS", "24"))  # Smooth 24fps playback
+COASTVISION_INFER_EVERY = int(os.environ.get("COASTVISION_INFER_EVERY", "2"))  # Detect every 2 frames for smoother boxes
 COASTVISION_IMGSZ = int(os.environ.get("COASTVISION_IMGSZ", "640"))  # Optimal for YOLOv8
 
 # Grid playback: serve a smaller cached JPEG to reduce bandwidth and stutter
 COASTVISION_GRID_MAX_W = int(os.environ.get("COASTVISION_GRID_MAX_W", "640"))
-COASTVISION_GRID_JPEG_QUALITY = int(os.environ.get("COASTVISION_GRID_JPEG_QUALITY", "75"))  # Improved from 72 for better quality
+COASTVISION_GRID_JPEG_QUALITY = int(os.environ.get("COASTVISION_GRID_JPEG_QUALITY", "80"))  # Higher quality for crisp boxes
 
 COASTVISION_DEVICE = os.environ.get("COASTVISION_DEVICE", "").strip()
 COASTVISION_ALERT_COOLDOWN_S = float(os.environ.get("COASTVISION_ALERT_COOLDOWN_S", "4"))
-COASTVISION_DET_HOLD_S = float(os.environ.get("COASTVISION_DET_HOLD_S", "0.75"))
+COASTVISION_DET_HOLD_S = float(os.environ.get("COASTVISION_DET_HOLD_S", "1.5"))  # Hold detections longer (1.5s) to prevent flickering
 COASTVISION_OVERLAY_STYLE = os.environ.get("COASTVISION_OVERLAY_STYLE", "pro").strip().lower()
 
 COASTVISION_ENABLE_PERSON_DET = os.environ.get("COASTVISION_ENABLE_PERSON_DET", "1").strip().lower() not in {
@@ -363,10 +363,15 @@ def _draw_detections(frame, dets: List[Dict[str, Any]]):
 
     h, w = frame.shape[:2]
     base = max(1, min(h, w))
-    thickness = max(4, int(round(base / 200)))
+    
+    # THICK, highly visible boxes - easy to see in dashboard grid
+    # 4-6px thick for good visibility at all scales
+    thickness = max(4, min(6, int(round(base / 150))))
+    
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = max(0.95, min(1.25, (base / 720) * 0.95))
-    text_th = max(2, thickness - 1)
+    # LARGE font - must be readable from dashboard grid view
+    font_scale = max(0.8, min(1.2, (base / 720) * 1.0))
+    text_th = max(2, min(3, thickness // 2))  # Bold text
 
     for d in dets:
         x1, y1, x2, y2 = d.get("bbox") or [0, 0, 0, 0]
@@ -378,27 +383,46 @@ def _draw_detections(frame, dets: List[Dict[str, Any]]):
         label = str(d.get("label") or "")
         conf = float(d.get("conf") or 0.0)
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), thickness + 2)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+        # Draw THICK bounding box - black outline + colored main box
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), thickness + 3)  # Black outline
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)  # Colored box
 
-        text = f"{label} {conf:.2f}".strip()
-        if not text:
+        # Format label text - decimal confidence format (e.g., 0.85)
+        text = f"{label} {conf:.2f}"
+        if not text.strip():
             continue
 
-        (tw, th), baseline = cv2.getTextSize(text, font, font_scale, text_th)
-        pad_x = 12
-        pad_y = 10
-        y_text_top = max(0, y1 - th - baseline - pad_y)
-        y_text_bottom = min(h - 1, y_text_top + th + baseline + pad_y)
-        x_text_left = max(0, x1)
-        x_text_right = min(w - 1, x_text_left + tw + pad_x)
+        (tw, th_text), baseline = cv2.getTextSize(text, font, font_scale, text_th)
+        pad_x = 10
+        pad_y = 8
+        label_h = th_text + pad_y * 2
+        label_w = tw + pad_x * 2
+        
+        # Smart label positioning - prefer above box, but go inside if no room
+        if y1 - label_h >= 0:
+            y_text_top = y1 - label_h
+            y_text_bottom = y1
+            x_text_left = x1
+        else:
+            y_text_top = y1
+            y_text_bottom = y1 + label_h
+            x_text_left = x1
+        
+        # Ensure label doesn't go off edges
+        if x_text_left + label_w > w:
+            x_text_left = max(0, w - label_w)
+        x_text_right = min(w, x_text_left + label_w)
 
-        cv2.rectangle(frame, (x_text_left, y_text_top), (x_text_right, y_text_bottom), color, -1)
-        cv2.rectangle(frame, (x_text_left, y_text_top), (x_text_right, y_text_bottom), (0, 0, 0), 2)
-
-        org = (x_text_left + 10, y_text_bottom - baseline - 5)
-        cv2.putText(frame, text, org, font, font_scale, (255, 255, 255), text_th + 3, cv2.LINE_AA)
-        cv2.putText(frame, text, org, font, font_scale, (0, 0, 0), text_th, cv2.LINE_AA)
+        # WHITE/LIGHT background for label - highly readable
+        cv2.rectangle(frame, (x_text_left, y_text_top), (x_text_right, y_text_bottom), (255, 255, 255), -1)
+        cv2.rectangle(frame, (x_text_left, y_text_top), (x_text_right, y_text_bottom), color, 3)  # Colored border
+        
+        # DARK text on light background - maximum readability
+        text_x = x_text_left + pad_x
+        text_y = y_text_bottom - pad_y
+        # Shadow for extra clarity
+        cv2.putText(frame, text, (text_x + 1, text_y + 1), font, font_scale, (150, 150, 150), text_th, cv2.LINE_AA)
+        cv2.putText(frame, text, (text_x, text_y), font, font_scale, (0, 0, 0), text_th, cv2.LINE_AA)
 
 
 # ----------------- STATE -----------------
@@ -621,10 +645,18 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
                             _record_alerts(alerts)
                             _persist_alerts(zid, alerts, frame)
                     else:
-                        if st.last_dets and (time.time() - (st.last_dets_ts or 0.0)) <= COASTVISION_DET_HOLD_S:
-                            _draw_detections(frame, st.last_dets)
+                        # ALWAYS draw cached detections on non-inference frames for stable boxes
+                        if st.last_dets:
+                            hold_time = time.time() - (st.last_dets_ts or 0.0)
+                            if hold_time <= COASTVISION_DET_HOLD_S:
+                                _draw_detections(frame, st.last_dets)
+                            # Even after hold time expires, keep drawing for smoothness
+                            # until new detection replaces old ones
+                            elif hold_time <= COASTVISION_DET_HOLD_S * 2:
+                                _draw_detections(frame, st.last_dets)
 
-                    ok2, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+                    # Higher JPEG quality (88) for crisp detection boxes and smooth video
+                    ok2, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
                     if ok2:
                         st.last_jpeg = jpg.tobytes()
 
@@ -637,7 +669,7 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
                                 gf = cv2.resize(
                                     gf,
                                     (int(gw * scale), int(gh * scale)),
-                                    interpolation=cv2.INTER_AREA,
+                                    interpolation=cv2.INTER_LINEAR,  # Better quality resize
                                 )
                             okg, jpg_g = cv2.imencode(
                                 ".jpg",

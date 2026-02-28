@@ -1,9 +1,9 @@
-@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap");
 
 :root {
   color-scheme: dark;
-  font-family: "Manrope", "Segoe UI", system-ui, -apple-system, sans-serif;
-  background-color: #0b1220;
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  background-color: #0a1525;
 }
 
 * {
@@ -14,10 +14,8 @@
 
 body {
   min-height: 100vh;
-  background: radial-gradient(circle at 20% 20%, rgba(46, 230, 255, 0.12), transparent 22%),
-    radial-gradient(circle at 80% 0%, rgba(255, 91, 110, 0.08), transparent 26%),
-    linear-gradient(135deg, #0b1220 55%, #111a2c 100%);
-  color: #e7eefc;
+  background: #0a1525;
+  color: #fff;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -28,4 +26,23 @@ a {
 
 button {
   font-family: inherit;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
 }
