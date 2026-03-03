@@ -27,6 +27,7 @@
 18. [How Everything Connects](#18-how-everything-connects)
 19. [Improving the Model](#19-improving-the-model)
 20. [Troubleshooting](#20-troubleshooting)
+21. [Development Changelog](#21-development-changelog)
 
 ---
 
@@ -134,6 +135,11 @@ Camera Videos → Backend (YOLO Detection) → Annotated Frames → Frontend Das
 | **React** | 18.3.1 | UI component framework |
 | **Material-UI (MUI)** | 6.2.0 | Pre-built UI components + styling |
 | **Vite** | 5.4.8 | Fast bundler and dev server |
+| **Chart.js** | 4.5.1 | Person Count Timeline charts |
+| **react-chartjs-2** | 5.3.1 | React wrapper for Chart.js |
+| **chartjs-adapter-date-fns** | 3.0.0 | Time-axis adapter for Chart.js |
+| **date-fns** | 4.1.0 | Date utility library |
+| **hls.js** | latest | HLS video streaming in browser |
 | **Web Speech API** | Browser built-in | Voice alert announcements |
 | **AudioContext API** | Browser built-in | Emergency alarm sounds |
 | **react-zoom-pan-pinch** | 3.5.0 | Video feed zoom/pan in fullscreen |
@@ -153,13 +159,13 @@ Camera Videos → Backend (YOLO Detection) → Annotated Frames → Frontend Das
 COASTVISION/
 │
 ├── backend/
-│   ├── server.py              ← Main Flask backend (1220 lines)
+│   ├── server.py              ← Main Flask backend (~1870 lines)
 │   └── server_old.py          ← Previous version (backup)
 │
 ├── frontend/
 │   ├── web/
 │   │   ├── src/
-│   │   │   └── App.jsx        ← Main React dashboard (1828 lines)
+│   │   │   └── App.jsx        ← Main React dashboard (~2700 lines)
 │   │   ├── index.html          ← HTML entry point
 │   │   ├── package.json        ← NPM dependencies
 │   │   ├── vite.config.js      ← Vite config (port 5173, host 0.0.0.0)
@@ -212,20 +218,23 @@ COASTVISION/
 
 ## 5. Backend (Python Flask Server)
 
-**File**: `backend/server.py` (~1220 lines)
+**File**: `backend/server.py` (~1870 lines)
 
 ### What it Does
 
 The backend is the **brain** of CoastVision. It:
 
 1. **Loads YOLO models** onto GPU (RTX 3050)
-2. **Opens video files** from `frontend/dashboard/videos/zone*.mp4`
+2. **Dynamically discovers video files** from `frontend/dashboard/videos/` (any format: mp4, avi, mkv, mov, webm, etc.)
 3. **Runs inference** on each frame to detect objects
 4. **Draws bounding boxes** with thick, visible borders and confidence scores
 5. **Serves annotated video** via HLS (HTTP Live Streaming), MJPEG streams, or single JPEG frames
 6. **Pipes annotated frames** to FFmpeg for HLS encoding (h264_nvenc or libx264 fallback)
 7. **Records alerts** when drowning/emergency is detected (CSV + images)
 8. **Manages lifeguards** (registration, zone assignment, real-time alerts)
+9. **Tracks person counts** over time per zone (10-second intervals, 24h rolling window)
+10. **Stores custom zone names** for user-defined zone labeling
+11. **Manages video files** (upload, delete, rename via API)
 
 ### Key Components
 
@@ -250,9 +259,37 @@ Each video zone gets its own **daemon thread** that:
 - Runs YOLO inference every N frames (default every 2nd frame)
 - Caches the latest annotated JPEG for API requests
 - Holds detections for 1.5 seconds to prevent box flickering
+- Records person count every 10 seconds (or immediately on count changes)
+- Clears stale detections when no new detections arrive after hold period
 - Loops the video when it reaches the end
 
-#### 3. Alert System
+#### 3. Person Count Tracking
+```python
+_zone_person_history: Dict[int, deque]  # (timestamp, count) per zone
+MAX_HISTORY_POINTS = 1440               # 24 hours at ~1 per minute
+```
+- Records current person count every 10 seconds per zone
+- Immediately records when count changes (0→3 or 5→2)
+- Always records including 0 count (when no people detected)
+- Data served via `/api/zones/{id}/timeline` endpoint
+- Used by frontend Person Count Timeline charts
+
+#### 4. Custom Zone Names
+```python
+_zone_custom_names: Dict[int, str]  # zone_id → display name
+```
+- Users can rename zones (e.g., "Zone 1" → "Main Beach Area")
+- Names accessible via `GET/POST /api/zones/{id}/name`
+- Included in `/api/zones` response
+
+#### 5. Video File Management
+- **Dynamic discovery**: Auto-scans video directory for all supported formats
+- **Upload**: `POST /api/videos/upload` with multipart form data (up to 10GB)
+- **Delete**: `DELETE /api/videos/<filename>` with zone cleanup
+- **Rename**: `POST /api/videos/<filename>/rename`
+- **Reload**: `POST /api/zones/reload` to force re-scan
+
+#### 6. Alert System
 When a detection exceeds the alert confidence threshold (default 0.55):
 - Added to in-memory `ALERT_HISTORY` (last 400 alerts)
 - Written to `data/alerts/alerts.csv`
@@ -279,16 +316,17 @@ half=True                              # FP16 inference (halves VRAM usage)
 
 ## 6. Frontend (React Dashboard)
 
-**File**: `frontend/web/src/App.jsx` (~1828 lines)
+**File**: `frontend/web/src/App.jsx` (~2700 lines)
 
 ### Dashboard Tabs
 
 | Tab | Name | Purpose |
 |---|---|---|
 | **0** | Monitoring | Live video grid of all zones with detection overlays |
-| **1** | Analytics | Charts, stats, detection timeline, zone activity |
+| **1** | Analytics | Sub-sectioned analytics: Overview, Person Count, Detections, Live Feed |
 | **2** | Event History | Table of all recorded detection events |
 | **3** | Settings | Backend config, GPU info, connection status |
+| **4** | Video Manager | Upload, delete, rename video files |
 
 ### Tab 0: Monitoring (Live View)
 
@@ -302,6 +340,7 @@ The main surveillance view showing a responsive grid of all camera zones.
 - **Person counter** showing how many people detected
 - **Emergency indicator** (blinking red chip) when drowning detected
 - **Click-to-expand** any zone for fullscreen view with zoom/pan
+- **Custom zone names** displayed on card headers (click to rename inline)
 - **Pause/Play** controls for all zones
 - **Zone reload** to detect new video files without restart
 
@@ -324,33 +363,43 @@ If HLS fails (e.g., FFmpeg unavailable), the frontend automatically falls back t
 
 ### Tab 1: Analytics
 
-**Key Metrics Cards** (4 large cards):
+The analytics tab is divided into **4 navigable sub-sections** via a styled button bar. Only the active sub-section renders at a time (prevents stutter from rendering all charts simultaneously).
+
+**Always Visible — Key Metrics Cards** (4 large cards):
 - Total Detections (48px font)
 - Monitored Zones
 - Emergency Alerts
 - Average Confidence
 
-**Pie Chart** (SVG donut, 240x240):
-- Distribution of detection types (Drowning, Swimming, Person out of water)
-- Animated segments with glow effect
-- Legend with count and percentage
+**Sub-section: Overview**
 
-**Bar Chart** (320px height):
-- Zone activity comparison
-- Count labels above each bar
-- Color-coded by zone
-- Summary stats: Most Active zone, Average per zone, Coverage %
+- **Pie Chart** (SVG donut, 240x240): Distribution of detection types with animated segments, glow effect, legend with count and percentage.
+- **Bar Chart** (320px height): Zone activity comparison with color-coded bars, custom zone names as labels, summary stats (Most Active, Avg/Zone, Coverage).
 
-**Detection Moments Timeline**:
-- Visual timeline of last 30 detection events
-- Bar height = confidence level
-- Red bars = emergency, Cyan bars = normal
-- Breakdown: Normal Detections, Emergency Events, Total Events
+**Sub-section: Person Count**
 
-**Live Activity Feed**:
-- Recent alert cards with zone, label, confidence, timestamp
-- Emergency alerts highlighted in red
-- Live pulse indicator
+- **Person Count Timeline** (Chart.js Line charts, one per zone in 2-column grid)
+  - Real-time person count over time (last 24 hours)
+  - Per-zone accent colors (teal, green, amber, purple, pink, cyan)
+  - Gradient fill under line, smooth curve (`tension: 0.35`)
+  - **Axis labels**: X = "Time" (5-min intervals, HH:MM), Y = "People Count" (integers only)
+  - **Stats row**: Current count, Peak, Average displayed above each chart
+  - **Custom tooltip**: Shows exact time (HH:MM:SS) + "People in zone: X"
+  - **Axis legend footer**: "X-axis: Time (HH:MM) | Y-axis: Number of people detected in zone"
+  - Polls `/api/zones/{id}/timeline` every 5 seconds
+  - Empty state: "Collecting data..." with description
+
+**Sub-section: Detections**
+
+- **Confidence Bar Chart**: Last 40 detection events as vertical bars (height = confidence, color = emergency/normal).
+- **Detection Stats**: Normal Detections, Emergency Events, Total Events.
+- **Per-Zone Breakdown Cards**: One card per zone showing detection count, percentage, progress bar.
+
+**Sub-section: Live Feed**
+
+- **Recent Activity Grid**: Up to 30 alert cards in 3-column grid (scrollable, 600px max height).
+- Each card shows: label, custom zone name chip, confidence %, timestamp.
+- Emergency alerts highlighted in red with pulsing dot.
 
 ### Tab 2: Event History
 
@@ -368,11 +417,32 @@ Displays backend configuration including:
 
 The frontend polls the backend at regular intervals:
 ```javascript
-usePollJson('/api/zones', 2000)      // Zone list every 2s
-usePollJson('/api/health', 3000)     // Backend health every 3s
-usePollJson('/api/alerts', 1500)     // Alert list every 1.5s
-usePollJson('/api/analysis', 1500)   // Analysis data every 1.5s
+usePollJson('/api/zones', 1200)       // Zone list every 1.2s (dynamic discovery)
+usePollJson('/api/health', 3000)      // Backend health every 3s
+usePollJson('/api/alerts', 1500)      // Alert list every 1.5s
+usePollJson('/api/analysis', 1500)    // Analysis data every 1.5s
+usePollJson('/api/zones/{id}/timeline', 5000)  // Person count per zone every 5s
 ```
+
+### Key Components
+
+| Component | Purpose |
+|-----------|--------|
+| `usePollJson(url, interval)` | Hook for polling any JSON API endpoint at intervals |
+| `ZoneStreamView` | HLS > MJPEG > poll-based video player with auto-fallback |
+| `PersonCountTimeline` | Chart.js line chart with gradient fill, stats cards, axis labels |
+| `ZoneNameEditor` | Inline zone rename with dialog |
+| `VideoManagerTab` | File management UI with drag-and-drop upload, delete, rename |
+| `useEmergencyVoiceAlert` | Voice alert hook with rate limiting and deduplication |
+
+### Tab 4: Video Manager
+
+A dedicated file management interface for video feeds:
+- **Upload**: Drag-and-drop or file picker with progress indicator (supports up to 10GB files)
+- **File list**: Shows all video files in the videos directory with size and format
+- **Delete**: Remove video files with confirmation
+- **Rename**: Inline rename with validation
+- **Dynamic**: Adding/removing files automatically updates the zone grid (no restart needed)
 
 ---
 
@@ -673,7 +743,18 @@ Lifeguard data is stored in `data/alerts/lifeguards.json`:
 
 ## 12. Analytics Dashboard
 
-### Key Metrics (4 Cards)
+### Sub-Section Navigation
+
+The analytics tab is now divided into 4 sub-sections, controlled by `analyticsSection` state. A styled button bar at the top lets users switch between sections. Only the active section renders, preventing scroll stutter.
+
+| Sub-Section | Key | Content |
+|---|---|---|
+| **Overview** | `overview` | Pie chart (detection types) + Bar chart (zone activity) + summary stats |
+| **Person Count** | `timeline` | Per-zone person count timeline charts (Chart.js) |
+| **Detections** | `detections` | Confidence bars + type breakdown + per-zone detection cards |
+| **Live Feed** | `activity` | Recent alert events grid (up to 30 events) |
+
+### Key Metrics (Always Visible)
 
 | Metric | Source | Description |
 |---|---|---|
@@ -682,30 +763,41 @@ Lifeguard data is stored in `data/alerts/lifeguards.json`:
 | Emergency Alerts | Filtered from alerts | Alerts containing "drown" or "emerg" |
 | Avg Confidence | Calculated from alerts | Mean confidence of all alert items |
 
-### Charts
+### Person Count Timeline (Chart.js)
 
-**Pie Chart (Detection Type Distribution)**:
-- SVG donut chart (240×240px)
-- Shows percentage of each detection class
-- Center displays total count
-- Legend with color, label, count, percentage
+Each zone gets a dedicated `PersonCountTimeline` component:
 
-**Bar Chart (Zone Activity)**:
-- Height 320px
-- One bar per zone
-- Count label above each bar
-- Y-axis with gridlines
-- Summary stats: Most Active, Avg/Zone, Coverage
+```
+┌──────────────────────────────────────────┐
+│  ● Zone Name                 data pts │
+├──────────────────────────────────────────┤
+│  👤 Current   📈 Peak   📊 Average  │
+│     3          7        4.2       │
+├──────────────────────────────────────────┤
+│  People                             │
+│  Count  5─┬───────┬───              │
+│         │ ╱     │    ╲             │
+│         3╱      │     ╲──2         │
+│         │       │              │    │
+│        0┴───────┴────────────┴──  │
+│         10:00   10:15  10:30 Time  │
+├──────────────────────────────────────────┤
+│  X: Time (HH:MM) | Y: People count  │
+└──────────────────────────────────────────┘
+```
 
-**Detection Moments Timeline**:
-- Last 30 events as vertical bars
-- Height = confidence level
-- Color = red (emergency) or cyan (normal)
-- Breakdown cards: Normal/Emergency/Total counts
+- **Accent colors**: Each zone gets a unique color from palette
+- **Gradient fill**: Area under line fades from accent color to transparent
+- **Tooltip**: Shows exact time (HH:MM:SS) + person count
+- **5-min tick intervals** on X-axis, integer-only Y-axis
+- **Data source**: Polls `/api/zones/{id}/timeline` every 5 seconds
 
 ### Data Source
 
-All analytics data comes from the `/api/analysis` endpoint which aggregates from in-memory `ALERT_HISTORY`.
+All analytics data comes from:
+- `/api/analysis` — aggregated alert stats
+- `/api/alerts` — recent alert events
+- `/api/zones/{id}/timeline` — person count history per zone
 
 ---
 
@@ -826,7 +918,7 @@ HLS segments are stored in a temporary directory that is automatically cleaned u
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/api/health` | Backend health, GPU info, config |
-| GET | `/api/zones` | List all camera zones and their status |
+| GET | `/api/zones` | List all camera zones and their status (includes custom names) |
 | POST | `/api/zones/reload` | Force rescan for new zone video files |
 | GET | `/api/zones/{id}/frame.jpg` | Latest annotated JPEG frame |
 | GET | `/api/zones/{id}/stream.mjpg` | MJPEG video stream |
@@ -834,8 +926,20 @@ HLS segments are stored in a temporary directory that is automatically cleaned u
 | GET | `/api/zones/{id}/hls/{filename}` | HLS .ts segment file |
 | GET | `/api/hls/status` | HLS encoder status for all zones |
 | GET | `/api/zones/{id}/detections` | Current detection boxes for a zone |
+| GET | `/api/zones/{id}/timeline` | Person count history (last 24h, 10s intervals) |
+| GET/POST | `/api/zones/{id}/name` | Get or set custom zone name |
+| GET | `/api/analytics/timeline` | All zones timeline data in one call |
 | GET | `/api/alerts` | Recent alerts (query: `?limit=120&zone=1`) |
 | GET | `/api/analysis` | Aggregated stats (total, by_zone, by_label) |
+
+### Video Management APIs
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/api/videos` | List video files + directory path |
+| POST | `/api/videos/upload` | Upload a new video file (multipart, up to 10GB) |
+| DELETE | `/api/videos/{filename}` | Delete a video file + cleanup zone |
+| POST | `/api/videos/{filename}/rename` | Rename a video file (body: `{new_name}`) |
 
 ### Lifeguard APIs
 
@@ -858,7 +962,7 @@ HLS segments are stored in a temporary directory that is automatically cleaned u
 {
   "status": "ok",
   "device": "cuda:0",
-  "gpu_name": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "gpu_name": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
   "gpu_vram_gb": 6.0,
   "cuda_smoke_ok": true,
   "hls_enabled": true,
@@ -868,6 +972,28 @@ HLS segments are stored in a temporary directory that is automatically cleaned u
   "alert_conf": 0.55,
   "fps": 24,
   "imgsz": 640
+}
+```
+
+**GET /api/zones**:
+```json
+{
+  "items": [
+    { "id": 1, "video": "beach_cam.mp4", "name": "Main Beach Area", "ok": true },
+    { "id": 2, "video": "pool_east.mp4", "name": "Zone 2", "ok": true }
+  ]
+}
+```
+
+**GET /api/zones/{id}/timeline**:
+```json
+{
+  "zone": 1,
+  "timeline": [
+    { "timestamp": 1709312400.0, "count": 3 },
+    { "timestamp": 1709312410.0, "count": 5 },
+    { "timestamp": 1709312420.0, "count": 4 }
+  ]
 }
 ```
 
@@ -1010,9 +1136,17 @@ Open `http://localhost:5173` in your browser. You should see:
 
 ### Adding New Camera Zones
 
-1. Place video file as `zone{N}.mp4` in `frontend/dashboard/videos/`
-2. Click the reload button in the dashboard (or restart backend)
-3. New zone appears automatically
+**Option A — Via Video Manager (recommended):**
+1. Go to the **Video Manager** tab in the dashboard
+2. Drag-and-drop a video file or click to upload
+3. New zone appears automatically within ~1 second
+
+**Option B — Manual:**
+1. Place any video file in `frontend/dashboard/videos/` (any name, any format: mp4, avi, mkv, mov, webm, etc.)
+2. Zone appears automatically (polled every 1.2 seconds)
+3. Or click the reload button in the dashboard
+
+**Note**: Zone naming is no longer restricted to `zone*.mp4` — any video filename works. Zones are dynamically discovered and assigned IDs automatically. You can rename zones via the inline `ZoneNameEditor` on each card.
 
 ---
 
@@ -1230,8 +1364,11 @@ Try `yolov8s.pt` with `batch=4` if you want better accuracy.
 │  API:        http://localhost:8000             │
 │  Lifeguard:  http://<PC-IP>:5173/lifeguard.html│
 │                                                │
-│  Add Zone:   Place zone{N}.mp4 in             │
+│  Add Zone:   Video Manager tab (upload)        │
+│              or place any video in              │
 │              frontend/dashboard/videos/         │
+│                                                │
+│  Rename Zone: Click zone name in dashboard     │
 │                                                │
 │  New Model:  Copy best.pt to models/best.pt   │
 │              Restart backend                    │
@@ -1243,12 +1380,125 @@ Try `yolov8s.pt` with `batch=4` if you want better accuracy.
 │              2=Swimming                        │
 │                                                │
 │  GPU:        RTX 3050 6GB VRAM                │
-│  Framework:  PyTorch 2.9.1 + CUDA 12.x       │
+│  Framework:  PyTorch 2.x + CUDA 12.4          │
 │  Model:      YOLOv8 Nano (fine-tuned)         │
+│                                                │
+│  Dashboard Tabs:                               │
+│    0 = Monitoring (live video grid)            │
+│    1 = Analytics (4 sub-sections)              │
+│    2 = Event History                           │
+│    3 = Settings                                │
+│    4 = Video Manager                           │
+│                                                │
+│  Analytics Sub-sections:                       │
+│    Overview | Person Count | Detections | Feed │
 │                                                │
 └────────────────────────────────────────────────┘
 ```
 
 ---
 
-*This document covers the complete CoastVision AI project as of March 2026. For any future changes, update the relevant sections above.*
+## 21. Development Changelog
+
+All development changes in reverse chronological order.
+
+### 2026-03-03 — Analytics Overhaul & Person Count Improvements
+
+**Backend (`backend/server.py`)**
+- **Person count accuracy fix**: Rewrote `_record_person_count()` to record every 10 seconds (was 60s) for smoother chart lines, record immediately on count changes, and always record including 0 count (previously skipped when no people detected).
+- **Stale detection cleanup**: Added logic to clear `last_dets` after hold period when no new detections arrive, ensuring person count correctly drops to 0.
+- **Detection loop update**: Now always calls `_record_person_count()` even when `dets` is empty.
+
+**Frontend (`frontend/web/src/App.jsx`)**
+- **Analytics sub-sections**: Split the monolithic analytics tab into 4 navigable sub-sections:
+  - Overview — Pie chart + bar chart + zone stats
+  - Person Count — Timeline charts per zone
+  - Detections — Confidence bars + breakdown stats + per-zone cards
+  - Live Feed — Recent activity grid (expanded from 12 to 30 events)
+- **Sub-section tab bar**: Styled button bar with icons. Only active section renders → eliminates scroll stutter.
+- **`analyticsSection` state**: New state variable controlling which sub-section is visible.
+- **Bar chart / activity feed / "Most Active"**: Now show custom zone names.
+
+---
+
+### 2026-03-03 — Person Count Timeline UI Enhancement
+
+**Frontend (`frontend/web/src/App.jsx`)**
+- **`PersonCountTimeline` component rewrite**:
+  - Axis titles (X: "Time", Y: "People Count") rendered on chart scales
+  - Axis legend footer: "X-axis: Time (HH:MM) | Y-axis: Number of people detected in zone"
+  - 5-minute tick intervals, integer-only Y-axis (`stepSize: 1`)
+  - Stats row: Current count, Peak, Average
+  - Per-zone accent colors (teal, green, amber, purple, pink, cyan)
+  - Gradient fill under line (fades from color to transparent)
+  - Custom tooltip: exact time (HH:MM:SS) + "People in zone: X"
+  - Data points count chip, empty state, card redesign
+
+---
+
+### 2026-03-03 — Person Count Timeline & Custom Zone Names
+
+**Backend (`backend/server.py`)**
+- New data structures: `_zone_person_history` (deque per zone), `_zone_custom_names`, `MAX_HISTORY_POINTS = 1440`
+- New helpers: `_record_person_count()`, `_get_zone_display_name()`, `_set_zone_name()`
+- New endpoints: `GET /api/zones/{id}/timeline`, `GET/POST /api/zones/{id}/name`, `GET /api/analytics/timeline`
+- Updated `/api/zones` response to include `name` field
+
+**Frontend (`frontend/web/src/App.jsx`)**
+- Chart.js integration: Installed chart.js, react-chartjs-2, chartjs-adapter-date-fns, date-fns
+- `PersonCountTimeline` component: polls timeline API, renders Line chart with time x-axis
+- `ZoneNameEditor` component: inline rename dialog
+- `zoneNames` state (Map) synced from zones API
+- Person Count Timeline section in analytics tab (one chart per zone, 2-column grid)
+
+---
+
+### 2026-03-02 — Dynamic Zone Discovery & Video Manager
+
+**Backend (`backend/server.py`)**
+- Dynamic zone discovery: auto-created from video files, no hardcoded zone limit, supports any video format
+- Video management API: upload, delete, rename with validation
+- Zone reload endpoint: `POST /api/zones/reload`
+- `MAX_CONTENT_LENGTH` set to 10GB
+
+**Frontend (`frontend/web/src/App.jsx`)**
+- Video Manager tab: drag-and-drop upload, delete with confirmation, rename inline
+- Dynamic grid: adapts to any number of zones
+- Modal fix: broken template literal + pre-load frame on open
+
+---
+
+### 2026-03-01 — GPU Fix & Blank Screen Fix
+
+**Backend**
+- GPU issue: VS Code used system Python instead of venv Python → always start with `.venv\Scripts\python.exe`
+- Verified: CUDA available, RTX 3050 6GB, `device: cuda:0`, `cudnn_benchmark: true`
+
+**Frontend (`frontend/web/src/App.jsx`)**
+- Blank screen fix: `zoneNames` state never declared — added `useState(new Map())`
+- Removed duplicate zone name sync useEffect
+- Added Chart.js Filler plugin registration
+
+---
+
+### 2026-03-01 — Git Cleanup
+
+- 10k changes caused by untracked `LifeguardApp/` folder (node_modules, .expo, android build artifacts)
+- Added `LifeguardApp/` to `.gitignore`, committed and pushed to main (commit `1826311`)
+- Created `feat/lifeguard-app` branch for mobile app work
+
+---
+
+### Pre-2026-03 — Initial Build
+
+- YOLO model training pipeline (YOLOv8 + YOLOv5)
+- Flask backend with inference loop, HLS/MJPEG streaming, alerts
+- React dashboard with MUI, zone grid, event logs, settings
+- Alert engine with confidence thresholds and CSV logging
+- Voice announcement (Web Speech API)
+- Lifeguard management API (register, assign, heartbeat, SSE)
+- Colab training documentation
+
+---
+
+*This document covers the complete CoastVision AI project as of March 2026. It is updated whenever features are added, bugs are fixed, or architecture changes. See also `docs/project_plan.md` for a summary/viva guide explaining the system from end to end.*
