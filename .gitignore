@@ -4,6 +4,12 @@
 venv/
 .venv/
 
+# ==============================
+# Feature Branch Content
+# ==============================
+# Lifeguard App (lives on feat/lifeguard-app branch)
+LifeguardApp/
+
 # VS Code local settings
 .vscode/
 
