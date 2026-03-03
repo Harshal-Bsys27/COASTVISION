@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+﻿import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import Hls from "hls.js";
 import {
   AppBar,
   Box,
@@ -46,6 +47,12 @@ import ZoomInIcon from "@mui/icons-material/ZoomIn";
 import ZoomOutIcon from "@mui/icons-material/ZoomOut";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import TrendingUpIcon from "@mui/icons-material/TrendingUp";
+import VideoLibraryIcon from "@mui/icons-material/VideoLibrary";
+import DeleteIcon from "@mui/icons-material/Delete";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import EditIcon from "@mui/icons-material/Edit";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
 
 const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
@@ -113,12 +120,16 @@ const zoneFrameUrl = (z, nonce, opts) => {
 };
 
 function ZoneCardPlayback({ zid, paused }) {
-  // NEW: prefer MJPEG for “real video”; fallback to frame polling if stream fails or paused
-  const [useMjpeg, setUseMjpeg] = useState(true);
+  // Playback priority: HLS (hardware decoded) > MJPEG > blob polling
+  // Blob polling always runs in background as safety net
+  const [mode, setMode] = useState("hls"); // "hls" | "mjpeg" | "poll"
+  const [hlsPlaying, setHlsPlaying] = useState(false);
   const [mjpegOk, setMjpegOk] = useState(false);
   const [blobUrl, setBlobUrl] = useState("");
   const blobUrlRef = useRef("");
   const timerRef = useRef(null);
+  const videoRef = useRef(null);
+  const hlsRef = useRef(null);
 
   const det = usePollJson(`${API}/api/zones/${zid}/detections`, 700, true, { count: 0, items: [] });
   const emergency = useMemo(() => {
@@ -131,24 +142,107 @@ function ZoneCardPlayback({ zid, paused }) {
     return (det.items || []).filter((d) => String(d.label || "").toLowerCase() === "person").length;
   }, [det]);
 
-  // MJPEG “loaded” watchdog: if it never loads, switch to fallback
+  // HLS playback via hls.js
   useEffect(() => {
-    setMjpegOk(false);
-    if (!useMjpeg || paused) return;
-    const t = setTimeout(() => {
-      if (!mjpegOk) setUseMjpeg(false);
-    }, 1500);
-    return () => clearTimeout(t);
-  }, [zid, paused, useMjpeg, mjpegOk]);
-
-  // Fallback frame polling -> blob URL (avoids <img> churn + false errors)
-  useEffect(() => {
-    const shouldPoll = paused || !useMjpeg;
-    if (!shouldPoll) {
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
+    if (mode !== "hls" || paused) {
+      setHlsPlaying(false);
       return;
     }
+    const video = videoRef.current;
+    if (!video) { setMode("mjpeg"); return; }
+
+    setHlsPlaying(false);
+    const hlsUrl = `${API}/api/zones/${zid}/hls/stream.m3u8`;
+
+    // Watchdog: if video hasn't started playing within 5s → MJPEG
+    let playing = false;
+    const onTimeUpdate = () => {
+      if (!playing) { playing = true; setHlsPlaying(true); }
+    };
+    video.addEventListener("timeupdate", onTimeUpdate);
+    const watchdog = setTimeout(() => {
+      if (!playing) {
+        console.warn(`[HLS] Zone ${zid}: no playback after 5s, falling back to MJPEG`);
+        setMode("mjpeg");
+      }
+    }, 5000);
+
+    // Safari native HLS
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = hlsUrl;
+      video.play().catch(() => {});
+      const onError = () => setMode("mjpeg");
+      video.addEventListener("error", onError);
+      return () => {
+        video.removeEventListener("error", onError);
+        video.removeEventListener("timeupdate", onTimeUpdate);
+        clearTimeout(watchdog);
+        video.src = "";
+      };
+    }
+
+    // hls.js
+    if (!Hls.isSupported()) { setMode("mjpeg"); clearTimeout(watchdog); return; }
+
+    const hls = new Hls({
+      liveSyncDurationCount: 2,
+      liveMaxLatencyDurationCount: 4,
+      liveDurationInfinity: true,
+      enableWorker: true,
+      lowLatencyMode: true,
+      maxBufferLength: 4,
+      maxMaxBufferLength: 8,
+      maxBufferSize: 2 * 1024 * 1024,
+      manifestLoadingTimeOut: 6000,
+      manifestLoadingMaxRetry: 2,
+      manifestLoadingRetryDelay: 1000,
+      levelLoadingTimeOut: 6000,
+      fragLoadingTimeOut: 6000,
+    });
+    hlsRef.current = hls;
+
+    let retryCount = 0;
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().catch(() => {});
+    });
+
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+      if (data.fatal) {
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && retryCount < 2) {
+          retryCount++;
+          setTimeout(() => hls.loadSource(hlsUrl), 1500);
+        } else {
+          hls.destroy();
+          hlsRef.current = null;
+          setMode("mjpeg");
+        }
+      }
+    });
+
+    hls.loadSource(hlsUrl);
+    hls.attachMedia(video);
+
+    return () => {
+      clearTimeout(watchdog);
+      video.removeEventListener("timeupdate", onTimeUpdate);
+      hls.destroy();
+      hlsRef.current = null;
+    };
+  }, [zid, paused, mode]);
+
+  // MJPEG watchdog: if it doesn't load in 3s, fall to poll
+  useEffect(() => {
+    if (mode !== "mjpeg" || paused) return;
+    setMjpegOk(false);
+    const t = setTimeout(() => {
+      if (!mjpegOk) setMode("poll");
+    }, 3000);
+    return () => clearTimeout(t);
+  }, [zid, paused, mode, mjpegOk]);
+
+  // Blob polling — ALWAYS runs as background safety net
+  useEffect(() => {
+    if (paused) return; // only stop when paused
 
     let alive = true;
     let inFlight = false;
@@ -176,7 +270,9 @@ function ZoneCardPlayback({ zid, paused }) {
     };
 
     fetchFrame();
-    timerRef.current = setInterval(fetchFrame, FALLBACK_FRAME_MS);
+    // Poll slower when HLS/MJPEG is active (just for safety), faster when it's the primary
+    const interval = mode === "poll" ? FALLBACK_FRAME_MS : 1000;
+    timerRef.current = setInterval(fetchFrame, interval);
 
     return () => {
       alive = false;
@@ -184,8 +280,9 @@ function ZoneCardPlayback({ zid, paused }) {
       timerRef.current = null;
       ctrl.abort();
     };
-  }, [zid, paused, useMjpeg]);
+  }, [zid, paused, mode]);
 
+  // Cleanup blob URLs on unmount
   useEffect(() => {
     return () => {
       if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
@@ -197,7 +294,7 @@ function ZoneCardPlayback({ zid, paused }) {
 
   return (
     <Box sx={{ position: "relative", width: "100%", height }}>
-      {/* Fallback (always works if backend can serve frame.jpg) */}
+      {/* Blob polling background — always present as safety net */}
       <img
         src={blobUrl}
         alt={`Zone ${zid} frame`}
@@ -207,20 +304,37 @@ function ZoneCardPlayback({ zid, paused }) {
           width: "100%",
           height: "100%",
           objectFit: "cover",
-          background: "#050a14",
+          background: "#0a2e38",
           userSelect: "none",
           pointerEvents: "none",
-          display: paused || !useMjpeg ? "block" : "none",
+          display: blobUrl ? "block" : "none",
         }}
       />
 
-      {/* Real “video” playback in cards */}
+      {/* HLS <video> - hardware decoded, overlays blob when playing */}
+      <video
+        ref={videoRef}
+        muted
+        autoPlay
+        playsInline
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          background: "transparent",
+          display: !paused && mode === "hls" && hlsPlaying ? "block" : "none",
+        }}
+      />
+
+      {/* MJPEG fallback */}
       <img
-        src={!paused && useMjpeg ? `${API}/api/zones/${zid}/stream.mjpg` : ""}
+        src={!paused && mode === "mjpeg" ? `${API}/api/zones/${zid}/stream.mjpg` : ""}
         alt={`Zone ${zid} stream`}
         onLoad={() => setMjpegOk(true)}
         onError={() => {
-          setUseMjpeg(false);
+          setMode("poll");
           setMjpegOk(false);
         }}
         style={{
@@ -229,10 +343,10 @@ function ZoneCardPlayback({ zid, paused }) {
           width: "100%",
           height: "100%",
           objectFit: "cover",
-          background: "#050a14",
+          background: "transparent",
           userSelect: "none",
           pointerEvents: "none",
-          display: !paused && useMjpeg ? "block" : "none",
+          display: !paused && mode === "mjpeg" ? "block" : "none",
         }}
       />
 
@@ -276,7 +390,39 @@ function ZoneCardPlayback({ zid, paused }) {
   );
 }
 
+
 // Voice alert for emergencies with speech synthesis - with smart rate limiting
+
+// --- Preload voices (Chrome loads them asynchronously) ---
+let _cachedVoices = [];
+const _loadVoices = () => {
+  if ('speechSynthesis' in window) {
+    _cachedVoices = window.speechSynthesis.getVoices();
+  }
+};
+_loadVoices();
+if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+  window.speechSynthesis.onvoiceschanged = _loadVoices;
+}
+
+// Pick best deep male voice available
+const getMaleVoice = () => {
+  const voices = _cachedVoices.length > 0 ? _cachedVoices : (window.speechSynthesis?.getVoices() || []);
+  // Priority order: deep male voices
+  const maleKeywords = ['David', 'Mark', 'James', 'Daniel', 'Male', 'Guy', 'Richard', 'George'];
+  for (const keyword of maleKeywords) {
+    const found = voices.find(v => v.name.includes(keyword) && v.lang.startsWith('en'));
+    if (found) return found;
+  }
+  // Fallback: any English Google voice (tends to sound professional)
+  const googleEn = voices.find(v => v.name.includes('Google') && v.lang.startsWith('en'));
+  if (googleEn) return googleEn;
+  // Fallback: any English voice
+  const anyEn = voices.find(v => v.lang.startsWith('en'));
+  if (anyEn) return anyEn;
+  return null;
+};
+
 const useEmergencyVoiceAlert = (alerts, soundEnabled, openZone, paused) => {
   const seenAlertsRef = useRef(new Set()); // Track alerts we've already announced
   const lastPlayRef = useRef(0);
@@ -359,10 +505,11 @@ const useEmergencyVoiceAlert = (alerts, soundEnabled, openZone, paused) => {
       const utterance = new SpeechSynthesisUtterance(message);
       utterance.rate = 1.0;
       utterance.volume = 1.0;
+      utterance.pitch = 0.9;
       utterance.lang = 'en-US';
       
       const voices = window.speechSynthesis.getVoices();
-      const preferredVoice = voices.find(v => v.name.includes('Google') || v.name.includes('Female'));
+      const preferredVoice = getMaleVoice();
       if (preferredVoice) utterance.voice = preferredVoice;
       
       utterance.onend = () => { speakingRef.current = false; };
@@ -378,15 +525,270 @@ const speakAnnouncement = (message, rate = 0.9) => {
   if ('speechSynthesis' in window) {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(message);
-    utterance.rate = rate; // Slightly slower for clarity
+    utterance.rate = rate;
     utterance.volume = 1.0;
     utterance.lang = 'en-US';
-    const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find(v => v.name.includes('Google') || v.name.includes('Female') || v.name.includes('Samantha'));
+    utterance.pitch = 0.9;
+    const preferredVoice = getMaleVoice();
     if (preferredVoice) utterance.voice = preferredVoice;
     window.speechSynthesis.speak(utterance);
   }
 };
+
+
+// ===================== VIDEO MANAGER COMPONENT =====================
+function VideoManager({ api, onReload }) {
+  const [videos, setVideos] = useState([]);
+  const [videoDir, setVideoDir] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState("");
+  const [renaming, setRenaming] = useState(null); // filename being renamed
+  const [newName, setNewName] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const fetchVideos = useCallback(async () => {
+    try {
+      const r = await fetch(`${api}/api/videos`);
+      if (r.ok) {
+        const data = await r.json();
+        setVideos(data.items || []);
+        setVideoDir(data.video_dir || "");
+      }
+    } catch {}
+  }, [api]);
+
+  useEffect(() => { fetchVideos(); const t = setInterval(fetchVideos, 3000); return () => clearInterval(t); }, [fetchVideos]);
+
+  const handleUpload = async (files) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    setUploadProgress(`Uploading ${files.length} file(s)...`);
+    try {
+      const fd = new FormData();
+      for (const f of files) fd.append("file", f);
+      const r = await fetch(`${api}/api/videos/upload`, { method: "POST", body: fd });
+      const data = await r.json();
+      if (r.ok) {
+        const ok = (data.uploaded || []).filter((u) => u.ok).length;
+        const fail = (data.uploaded || []).filter((u) => !u.ok).length;
+        setUploadProgress(`Uploaded ${ok} file(s)${fail > 0 ? `, ${fail} failed` : ""}. Zones reloaded.`);
+      } else {
+        setUploadProgress(data.error || "Upload failed");
+      }
+    } catch (e) {
+      setUploadProgress(`Error: ${e.message}`);
+    }
+    setUploading(false);
+    fetchVideos();
+    if (onReload) onReload();
+    setTimeout(() => setUploadProgress(""), 4000);
+  };
+
+  const handleDelete = async (filename) => {
+    if (!window.confirm(`Delete "${filename}"? This will stop its zone and remove the file.`)) return;
+    try {
+      const r = await fetch(`${api}/api/videos/${encodeURIComponent(filename)}`, { method: "DELETE" });
+      if (r.ok) {
+        fetchVideos();
+        if (onReload) onReload();
+      }
+    } catch {}
+  };
+
+  const handleRename = async (oldName) => {
+    if (!newName.trim() || newName.trim() === oldName) { setRenaming(null); return; }
+    try {
+      const r = await fetch(`${api}/api/videos/${encodeURIComponent(oldName)}/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_name: newName.trim() }),
+      });
+      if (r.ok) {
+        fetchVideos();
+        if (onReload) onReload();
+      } else {
+        const data = await r.json();
+        alert(data.error || "Rename failed");
+      }
+    } catch {}
+    setRenaming(null);
+    setNewName("");
+  };
+
+  const onDrop = (e) => { e.preventDefault(); setDragOver(false); handleUpload(e.dataTransfer.files); };
+  const onDragOver = (e) => { e.preventDefault(); setDragOver(true); };
+  const onDragLeave = () => setDragOver(false);
+
+  return (
+    <Box>
+      <Typography sx={{ fontWeight: 900, fontSize: 26, color: "#fff", display: "flex", alignItems: "center", gap: 2, mb: 1 }}>
+        <VideoLibraryIcon sx={{ color: "#2dd4bf", fontSize: 32 }} />
+        Video Manager
+      </Typography>
+      <Typography sx={{ fontSize: 15, color: "rgba(255,255,255,0.5)", mb: 4 }}>
+        Upload, manage and organize surveillance video clips. Any video file added here automatically becomes a zone.
+      </Typography>
+
+      {/* Upload Area */}
+      <Box
+        onDrop={onDrop}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onClick={() => fileInputRef.current?.click()}
+        sx={{
+          p: 5,
+          mb: 4,
+          borderRadius: 4,
+          border: dragOver ? "3px dashed #2dd4bf" : "3px dashed rgba(255,255,255,0.12)",
+          bgcolor: dragOver ? "rgba(45,212,191,0.08)" : "#0f1923",
+          cursor: "pointer",
+          textAlign: "center",
+          transition: "all 0.3s ease",
+          "&:hover": { borderColor: "rgba(45,212,191,0.5)", bgcolor: "rgba(45,212,191,0.05)" },
+        }}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="video/*"
+          multiple
+          hidden
+          onChange={(e) => handleUpload(e.target.files)}
+        />
+        <CloudUploadIcon sx={{ fontSize: 56, color: dragOver ? "#2dd4bf" : "rgba(255,255,255,0.3)", mb: 2 }} />
+        <Typography sx={{ fontWeight: 800, fontSize: 20, color: dragOver ? "#2dd4bf" : "#fff", mb: 1 }}>
+          {uploading ? "Uploading..." : "Drop video files here or click to browse"}
+        </Typography>
+        <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 14 }}>
+          Supports MP4, AVI, MKV, MOV, WebM, FLV, WMV, M4V, TS
+        </Typography>
+        {uploadProgress && (
+          <Chip
+            icon={<CheckCircleIcon sx={{ fontSize: 16 }} />}
+            label={uploadProgress}
+            sx={{ mt: 2, bgcolor: "rgba(45,212,191,0.15)", color: "#2dd4bf", fontWeight: 700 }}
+          />
+        )}
+        {uploading && <LinearProgress sx={{ mt: 2, borderRadius: 2, bgcolor: "rgba(45,212,191,0.15)", "& .MuiLinearProgress-bar": { bgcolor: "#2dd4bf" } }} />}
+      </Box>
+
+      {/* Video directory info */}
+      {videoDir && (
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 3, px: 1 }}>
+          <FolderOpenIcon sx={{ color: "rgba(255,255,255,0.3)", fontSize: 18 }} />
+          <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.4)", fontFamily: "monospace" }}>{videoDir}</Typography>
+        </Box>
+      )}
+
+      {/* Video Files List */}
+      <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr", lg: "1fr 1fr 1fr" }, gap: 3 }}>
+        {videos.length === 0 ? (
+          <Box sx={{ gridColumn: "1/-1", py: 10, textAlign: "center", borderRadius: 4, bgcolor: "#0f1923", border: "2px dashed rgba(255,255,255,0.08)" }}>
+            <VideoLibraryIcon sx={{ fontSize: 50, color: "rgba(255,255,255,0.15)", mb: 2 }} />
+            <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 16 }}>No video files found</Typography>
+            <Typography sx={{ color: "rgba(255,255,255,0.25)", fontSize: 13, mt: 1 }}>Upload videos above to create surveillance zones</Typography>
+          </Box>
+        ) : (
+          videos.map((v) => (
+            <Box
+              key={v.filename}
+              sx={{
+                p: 3,
+                borderRadius: 3,
+                bgcolor: "#0f1923",
+                border: v.active ? "1px solid rgba(45,212,191,0.25)" : "1px solid rgba(255,255,255,0.06)",
+                transition: "all 0.3s ease",
+                "&:hover": { borderColor: "rgba(255,255,255,0.15)", boxShadow: "0 8px 30px rgba(0,0,0,0.3)" },
+              }}
+            >
+              <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 2 }}>
+                <Avatar sx={{
+                  background: v.active ? "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)" : "rgba(255,255,255,0.08)",
+                  width: 44, height: 44, fontSize: 16, fontWeight: 900,
+                  color: v.active ? "#071520" : "rgba(255,255,255,0.4)",
+                }}>
+                  {v.zone_id || "?"}
+                </Avatar>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  {renaming === v.filename ? (
+                    <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                      <input
+                        autoFocus
+                        value={newName}
+                        onChange={(e) => setNewName(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") handleRename(v.filename); if (e.key === "Escape") setRenaming(null); }}
+                        style={{
+                          background: "rgba(255,255,255,0.08)", border: "1px solid rgba(45,212,191,0.4)", borderRadius: 6,
+                          color: "#fff", padding: "6px 10px", fontSize: 14, fontWeight: 600, width: "100%", outline: "none",
+                        }}
+                      />
+                      <IconButton size="small" onClick={() => handleRename(v.filename)} sx={{ color: "#2dd4bf" }}>
+                        <CheckCircleIcon sx={{ fontSize: 20 }} />
+                      </IconButton>
+                    </Box>
+                  ) : (
+                    <Typography sx={{ fontWeight: 700, fontSize: 15, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={v.filename}>
+                      {v.filename}
+                    </Typography>
+                  )}
+                  <Box sx={{ display: "flex", gap: 1.5, mt: 0.5, alignItems: "center" }}>
+                    <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>{v.size_mb} MB</Typography>
+                    {v.zone_id && <Chip label={`Zone ${v.zone_id}`} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800, bgcolor: "rgba(45,212,191,0.12)", color: "#2dd4bf" }} />}
+                    <Chip
+                      label={v.active ? "ACTIVE" : "IDLE"}
+                      size="small"
+                      sx={{
+                        height: 20, fontSize: 10, fontWeight: 800,
+                        bgcolor: v.active ? "rgba(105,240,174,0.15)" : "rgba(255,255,255,0.05)",
+                        color: v.active ? "#69f0ae" : "rgba(255,255,255,0.35)",
+                      }}
+                    />
+                  </Box>
+                </Box>
+              </Box>
+
+              {/* Actions */}
+              <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
+                <Tooltip title="Rename">
+                  <IconButton
+                    size="small"
+                    onClick={() => { setRenaming(v.filename); setNewName(v.filename); }}
+                    sx={{ color: "rgba(255,255,255,0.4)", "&:hover": { color: "#2dd4bf", bgcolor: "rgba(45,212,191,0.1)" } }}
+                  >
+                    <EditIcon sx={{ fontSize: 18 }} />
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="Delete">
+                  <IconButton
+                    size="small"
+                    onClick={() => handleDelete(v.filename)}
+                    sx={{ color: "rgba(255,255,255,0.4)", "&:hover": { color: "#ff5252", bgcolor: "rgba(255,82,82,0.1)" } }}
+                  >
+                    <DeleteIcon sx={{ fontSize: 18 }} />
+                  </IconButton>
+                </Tooltip>
+              </Box>
+            </Box>
+          ))
+        )}
+      </Box>
+
+      {/* Reload button */}
+      <Box sx={{ mt: 4, display: "flex", gap: 2 }}>
+        <Button
+          startIcon={<RefreshIcon />}
+          variant="contained"
+          onClick={() => { onReload?.(); fetchVideos(); }}
+          sx={{ background: "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", color: "#071520", fontWeight: 800, px: 4, py: 1.2, borderRadius: "12px", textTransform: "none", boxShadow: "0 4px 24px rgba(45,212,191,0.3)", "&:hover": { background: "linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)" } }}
+        >
+          Reload All Zones
+        </Button>
+      </Box>
+    </Box>
+  );
+}
+
 
 export default function App() {
   const [tab, setTab] = useState(0);
@@ -396,15 +798,18 @@ export default function App() {
   // Quick win states
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [autoAnnounce, setAutoAnnounce] = useState(false); // Auto announce toggle
+  const [autoAnnounce, setAutoAnnounce] = useState(true); // Auto announce toggle - ON by default for voice alerts
 
   const [modalPaused, setModalPaused] = useState(false);
-  const [modalUseMjpeg, setModalUseMjpeg] = useState(true);
+  const [modalMode, setModalMode] = useState("hls"); // "hls" | "mjpeg" | "poll"
+  const [modalHlsPlaying, setModalHlsPlaying] = useState(false);
   const [modalMjpegOk, setModalMjpegOk] = useState(false);
 
   const [modalBlobUrl, setModalBlobUrl] = useState("");
   const modalBlobUrlRef = useRef("");
   const modalVideoBoxRef = useRef(null);
+  const modalVideoRef = useRef(null);
+  const modalHlsRef = useRef(null);
 
   const { data: health, ok: backendOk } = usePollJsonWithOk(`${API}/api/health`, 2000, true, {
     status: "unknown",
@@ -437,21 +842,86 @@ export default function App() {
     };
   }, [openZone]);
 
-  // Modal fallback: poll /frame.jpg into a blob URL (always works, avoids “blank”).
+
+  // Modal HLS playback with watchdog
   useEffect(() => {
-    if (!openZone) return;
+    if (!openZone || modalMode !== "hls" || modalPaused) {
+      setModalHlsPlaying(false);
+      return;
+    }
+    const video = modalVideoRef.current;
+    if (!video) { setModalMode("mjpeg"); return; }
+
+    setModalHlsPlaying(false);
+    const hlsUrl = `${API}/api/zones/${openZone}/hls/stream.m3u8`;
+
+    // Watchdog: if no playback in 5s → MJPEG
+    let playing = false;
+    const onTimeUpdate = () => {
+      if (!playing) { playing = true; setModalHlsPlaying(true); }
+    };
+    video.addEventListener("timeupdate", onTimeUpdate);
+    const watchdog = setTimeout(() => {
+      if (!playing) {
+        console.warn(`[HLS] Modal zone ${openZone}: no playback, falling back`);
+        setModalMode("mjpeg");
+      }
+    }, 5000);
+
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = hlsUrl;
+      video.play().catch(() => {});
+      const onError = () => setModalMode("mjpeg");
+      video.addEventListener("error", onError);
+      return () => {
+        video.removeEventListener("error", onError);
+        video.removeEventListener("timeupdate", onTimeUpdate);
+        clearTimeout(watchdog);
+        video.src = "";
+      };
+    }
+
+    if (!Hls.isSupported()) { setModalMode("mjpeg"); clearTimeout(watchdog); return; }
+
+    const hls = new Hls({
+      liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 4,
+      liveDurationInfinity: true, enableWorker: true, lowLatencyMode: true,
+      maxBufferLength: 4, maxMaxBufferLength: 8, maxBufferSize: 2 * 1024 * 1024,
+      manifestLoadingTimeOut: 6000, manifestLoadingMaxRetry: 2,
+      manifestLoadingRetryDelay: 1000, levelLoadingTimeOut: 6000, fragLoadingTimeOut: 6000,
+    });
+    modalHlsRef.current = hls;
+    let retryCount = 0;
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}); });
+    hls.on(Hls.Events.ERROR, (_e, data) => {
+      if (data.fatal) {
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && retryCount < 2) {
+          retryCount++;
+          setTimeout(() => hls.loadSource(hlsUrl), 1500);
+        } else {
+          hls.destroy(); modalHlsRef.current = null; setModalMode("mjpeg");
+        }
+      }
+    });
+    hls.loadSource(hlsUrl);
+    hls.attachMedia(video);
+    return () => {
+      clearTimeout(watchdog);
+      video.removeEventListener("timeupdate", onTimeUpdate);
+      hls.destroy();
+      modalHlsRef.current = null;
+    };
+  }, [openZone, modalPaused, modalMode]);
+  // Modal: poll /frame.jpg - ALWAYS runs as background safety net
+  useEffect(() => {
+    if (!openZone || modalPaused) return;
 
     let alive = true;
     let inFlight = false;
     const ctrl = new AbortController();
 
-    const shouldPoll = modalPaused || !modalUseMjpeg || !modalMjpegOk;
-
     const fetchFrame = async () => {
-      if (!alive) return;
-      if (!shouldPoll) return;
-      if (modalPaused && modalBlobUrlRef.current) return;
-      if (inFlight) return;
+      if (!alive || inFlight) return;
       inFlight = true;
       try {
         const r = await fetch(`${API}/api/zones/${openZone}/frame.jpg?t=${Date.now()}`, {
@@ -469,27 +939,27 @@ export default function App() {
         modalBlobUrlRef.current = url;
         setModalBlobUrl(url);
       } catch {
-        // ignore transient aborts
       } finally {
         inFlight = false;
       }
     };
 
-    // prime immediately
     fetchFrame();
-    const t = shouldPoll && !modalPaused ? setInterval(fetchFrame, MODAL_REFRESH_MS) : null;
+    const interval = modalMode === "poll" ? MODAL_REFRESH_MS : 1000;
+    const t = setInterval(fetchFrame, interval);
 
     return () => {
       alive = false;
-      if (t) clearInterval(t);
+      clearInterval(t);
       ctrl.abort();
     };
-  }, [openZone, modalPaused, modalUseMjpeg, modalMjpegOk]);
+  }, [openZone, modalPaused, modalMode]);
 
   useEffect(() => {
     if (!openZone) {
       setModalPaused(false);
-      setModalUseMjpeg(true);
+      setModalMode("hls");
+      setModalHlsPlaying(false);
       setModalMjpegOk(false);
       if (modalBlobUrlRef.current) URL.revokeObjectURL(modalBlobUrlRef.current);
       modalBlobUrlRef.current = "";
@@ -511,19 +981,25 @@ export default function App() {
     }).length;
   }, [alerts]);
 
-  // Voice alert for emergencies - ONLY when bell (autoAnnounce) is ON or a zone is open
-  // This prevents alarm sounds when just viewing the dashboard grid
-  useEmergencyVoiceAlert(autoAnnounce ? alerts.items : null, soundEnabled && !paused && autoAnnounce, openZone, paused);
+  // Cancel speech immediately when muted or bell turned off
+  useEffect(() => {
+    if (!soundEnabled || !autoAnnounce) {
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    }
+  }, [soundEnabled, autoAnnounce]);
+
+  // Voice alert for emergencies on all zones - ONLY when bell (autoAnnounce) is ON AND sound is enabled
+  useEmergencyVoiceAlert(autoAnnounce && soundEnabled ? alerts.items : null, soundEnabled && autoAnnounce && !paused, openZone, paused);
   
-  // Zone-specific alerts when a zone is open (always plays when zone is open)
-  useEmergencyVoiceAlert(openZone ? modalAlerts.items : null, soundEnabled && !paused && !modalPaused && openZone, openZone, paused || modalPaused);
+  // Zone-specific alerts when a zone modal is open (plays when zone is open AND sound enabled)
+  useEmergencyVoiceAlert(openZone && soundEnabled ? modalAlerts.items : null, soundEnabled && !paused && !modalPaused && !!openZone, openZone, paused || modalPaused);
 
   // Announce zone status when opening a zone (only once per zone open)
   // This always works when a zone is opened, regardless of bell toggle
   const lastAnnouncedZoneRef = useRef(null);
   const zoneAnnouncedRef = useRef(false);
   useEffect(() => {
-    if (!openZone || paused) {
+    if (!openZone || paused || !soundEnabled) {
       lastAnnouncedZoneRef.current = null;
       zoneAnnouncedRef.current = false;
       return;
@@ -536,6 +1012,7 @@ export default function App() {
     // Wait a bit for detections data to load, then announce once
     const timer = setTimeout(() => {
       if (zoneAnnouncedRef.current) return; // Double check
+      if (!soundEnabled) return; // Re-check in case muted during timeout
       zoneAnnouncedRef.current = true;
       
       const emergencyAlerts = (modalAlerts.items || []).filter((a) => {
@@ -547,14 +1024,14 @@ export default function App() {
       if (emergencyAlerts.length > 0) {
         message = `Alert! Drowning detected in Zone ${openZone}. Check immediately.`;
       } else {
-        message = `Zone ${openZone} all clear and safe. No drowning detected.`;
+        message = `Zone ${openZone} monitoring active. No emergency detected.`;
       }
       
       speakAnnouncement(message, 1.0);
-    }, 1500);
+    }, 1200);
     
     return () => clearTimeout(timer);
-  }, [openZone, paused]); // Zone open announcement always works when zone is opened
+  }, [openZone, paused, soundEnabled]); // Zone open announcement respects soundEnabled
 
   // Auto announce all zones periodically when enabled
   const lastAutoAnnounceRef = useRef(0);
@@ -639,25 +1116,59 @@ export default function App() {
   }, [alerts]);
 
   return (
-    <Box sx={{ minHeight: "100vh", bgcolor: "#0a1117", color: "#e7eefc", pt: 2 }}>
-      {/* NAVBAR - Premium dark header with glassmorphism */}
-      <AppBar position="sticky" elevation={0} sx={{ background: "linear-gradient(90deg, #0d1b2a 0%, #152238 25%, #1a2d47 50%, #152238 75%, #0d1b2a 100%)", borderBottom: "none", borderRadius: { xs: 0, md: "16px" }, mx: { xs: 0, md: 2 }, mt: 1, boxShadow: "0 8px 50px rgba(0,0,0,0.9), 0 4px 25px rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.08)", "&::before": { content: '""', position: "absolute", top: 0, left: "3%", right: "3%", height: "1px", background: "linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.15) 15%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,0.15) 85%, transparent 100%)", borderRadius: "2px" }, "&::after": { content: '""', position: "absolute", bottom: 0, left: "3%", right: "3%", height: "1px", background: "linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.08) 15%, rgba(255,255,255,0.18) 50%, rgba(255,255,255,0.08) 85%, transparent 100%)", borderRadius: "2px" } }}>
+    <Box sx={{ minHeight: "100vh", background: "linear-gradient(175deg, #0a2e38 0%, #0d3b47 8%, #0f4150 18%, #0c3545 35%, #0a2c3a 55%, #091e2b 75%, #071520 100%)", color: "#e7eefc", pt: 2, position: "relative", overflow: "hidden" }}>
+      {/* Animated Ocean Waves Background */}
+      <Box sx={{ position: "fixed", bottom: 0, left: 0, right: 0, height: "220px", zIndex: 0, pointerEvents: "none", opacity: 0.15 }}>
+        <svg viewBox="0 0 1440 220" preserveAspectRatio="none" style={{ width: "100%", height: "100%", display: "block" }}>
+          <defs>
+            <linearGradient id="waveGrad1" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#2dd4bf" stopOpacity="0.6" />
+              <stop offset="100%" stopColor="#0d9488" stopOpacity="0.1" />
+            </linearGradient>
+            <linearGradient id="waveGrad2" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#5eead4" stopOpacity="0.4" />
+              <stop offset="100%" stopColor="#14b8a6" stopOpacity="0.05" />
+            </linearGradient>
+          </defs>
+          <path fill="url(#waveGrad1)" d="M0,120 C360,180 720,60 1080,120 C1260,150 1380,90 1440,120 L1440,220 L0,220 Z">
+            <animate attributeName="d" dur="8s" repeatCount="indefinite" values="M0,120 C360,180 720,60 1080,120 C1260,150 1380,90 1440,120 L1440,220 L0,220 Z;M0,140 C360,80 720,160 1080,100 C1260,80 1380,140 1440,100 L1440,220 L0,220 Z;M0,120 C360,180 720,60 1080,120 C1260,150 1380,90 1440,120 L1440,220 L0,220 Z" />
+          </path>
+          <path fill="url(#waveGrad2)" d="M0,160 C480,120 960,200 1440,140 L1440,220 L0,220 Z">
+            <animate attributeName="d" dur="6s" repeatCount="indefinite" values="M0,160 C480,120 960,200 1440,140 L1440,220 L0,220 Z;M0,140 C480,200 960,120 1440,170 L1440,220 L0,220 Z;M0,160 C480,120 960,200 1440,140 L1440,220 L0,220 Z" />
+          </path>
+        </svg>
+      </Box>
+      {/* Subtle top shimmer */}
+      <Box sx={{ position: "fixed", top: 0, left: 0, right: 0, height: "300px", zIndex: 0, pointerEvents: "none", background: "radial-gradient(ellipse 80% 50% at 50% 0%, rgba(45,212,191,0.06) 0%, transparent 70%)" }} />
+      {/* NAVBAR - Premium dark chrome header with gold accents */}
+      <AppBar position="sticky" elevation={0} sx={{ position: "relative", zIndex: 10, background: "linear-gradient(180deg, rgba(8,26,36,0.97) 0%, rgba(6,20,28,0.97) 100%)", backdropFilter: "blur(30px) saturate(200%)", WebkitBackdropFilter: "blur(30px) saturate(200%)", borderBottom: "none", borderRadius: { xs: 0, md: "16px" }, mx: { xs: 0, md: 2 }, mt: 1, boxShadow: "0 12px 50px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.05), inset 0 -1px 0 rgba(0,0,0,0.3)", border: "1px solid rgba(45,212,191,0.08)", "&::after": { content: '""', position: "absolute", bottom: 0, left: "5%", right: "5%", height: "1px", background: "linear-gradient(90deg, transparent, rgba(45,212,191,0.25), transparent)" } }}>
         <Toolbar sx={{ gap: 3, minHeight: 110, px: { xs: 2, md: 5 }, py: 2 }}>
-          {/* Logo */}
-          <Box sx={{ display: "flex", alignItems: "center", gap: 3 }}>
-            <Box sx={{ position: "relative" }}>
-              <Avatar sx={{ background: "linear-gradient(135deg, #00d9ff 0%, #0096c7 50%, #0077b6 100%)", width: 70, height: 70, boxShadow: "0 0 50px rgba(0,217,255,0.6), 0 0 100px rgba(0,150,199,0.3)", border: "4px solid rgba(0,217,255,0.5)" }}>
-                <WavesIcon sx={{ fontSize: 40, filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.5))" }} />
-              </Avatar>
-              <Box sx={{ position: "absolute", bottom: 2, right: 2, width: 20, height: 20, borderRadius: "50%", bgcolor: "#00ff88", border: "3px solid #1b263b", boxShadow: "0 0 15px rgba(0,255,136,0.8)" }} />
+          {/* Logo - Premium */}
+          <Box sx={{ display: "flex", alignItems: "center", gap: 2.5 }}>
+            <Box sx={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {/* Outer ocean accent ring */}
+              <Box sx={{ position: "absolute", inset: -5, borderRadius: "16px", background: "linear-gradient(135deg, rgba(45,212,191,0.4) 0%, rgba(20,184,166,0.15) 50%, rgba(45,212,191,0.4) 100%)", filter: "blur(4px)", animation: "oceanPulse 4s ease-in-out infinite", "@keyframes oceanPulse": { "0%, 100%": { opacity: 0.5 }, "50%": { opacity: 0.9 } } }} />
+              {/* Logo shield / emblem */}
+              <Box sx={{ position: "relative", zIndex: 1, width: 62, height: 62, borderRadius: "14px", background: "linear-gradient(145deg, #0a2e38 0%, #071520 100%)", border: "2px solid rgba(45,212,191,0.4)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 24px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.06)" }}>
+                <WavesIcon sx={{ fontSize: 32, color: "#2dd4bf", filter: "drop-shadow(0 0 6px rgba(45,212,191,0.5))" }} />
+              </Box>
+              {/* Status dot */}
+              <Box sx={{ position: "absolute", bottom: -2, right: -2, width: 14, height: 14, borderRadius: "50%", bgcolor: "#00e676", border: "2.5px solid #16161a", boxShadow: "0 0 8px rgba(0,230,118,0.6)", zIndex: 2 }} />
             </Box>
             <Box>
-              <Typography sx={{ fontWeight: 900, fontSize: 36, letterSpacing: -0.5, lineHeight: 1.1, background: "linear-gradient(135deg, #ffffff 0%, #00d9ff 50%, #48cae4 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", textShadow: "0 0 40px rgba(0,217,255,0.4)" }}>CoastVision</Typography>
-              <Typography sx={{ fontSize: 13, color: "#48cae4", fontWeight: 800, letterSpacing: 5, textTransform: "uppercase", mt: 0.5 }}>AI Beach Surveillance</Typography>
+              <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.3 }}>
+                <Typography sx={{ fontWeight: 300, fontSize: 34, letterSpacing: 3, lineHeight: 1, color: "rgba(255,255,255,0.92)", fontFamily: "'Inter', 'Segoe UI', sans-serif" }}>COAST</Typography>
+                <Typography sx={{ fontWeight: 800, fontSize: 34, letterSpacing: 1, lineHeight: 1, background: "linear-gradient(135deg, #5eead4 0%, #2dd4bf 40%, #14b8a6 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>VISION</Typography>
+              </Box>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 0.5 }}>
+                <Box sx={{ width: 20, height: 1, bgcolor: "rgba(45,212,191,0.4)" }} />
+                <Typography sx={{ fontSize: 10, color: "rgba(45,212,191,0.7)", fontWeight: 600, letterSpacing: 5, textTransform: "uppercase" }}>AI Surveillance</Typography>
+                <Box sx={{ width: 20, height: 1, bgcolor: "rgba(45,212,191,0.4)" }} />
+              </Box>
             </Box>
           </Box>
 
-          <Divider orientation="vertical" flexItem sx={{ mx: 3, borderColor: "rgba(0,217,255,0.3)", height: 55, alignSelf: "center" }} />
+          <Divider orientation="vertical" flexItem sx={{ mx: 3, borderColor: "rgba(255,255,255,0.08)", height: 55, alignSelf: "center" }} />
 
           {/* Status chips */}
           <Stack direction="row" spacing={2}>
@@ -665,19 +1176,19 @@ export default function App() {
               <Chip
                 icon={<FiberManualRecordIcon sx={{ fontSize: 12 }} />}
                 label={backendOk === false ? "Offline" : backendOk === true ? "Online" : "…"}
-                sx={{ bgcolor: backendOk === false ? "rgba(244,67,54,0.2)" : "rgba(0,255,136,0.12)", color: backendOk === false ? "#ff5252" : "#00ff88", fontWeight: 800, fontSize: 14, height: 42, px: 1.5, border: `2px solid ${backendOk === false ? "rgba(244,67,54,0.4)" : "rgba(0,255,136,0.4)"}`, "& .MuiChip-icon": { color: backendOk === false ? "#ff5252" : "#00ff88" } }}
+                sx={{ bgcolor: backendOk === false ? "rgba(244,67,54,0.15)" : "rgba(0,230,118,0.1)", color: backendOk === false ? "#ff6b6b" : "#00e676", fontWeight: 700, fontSize: 13, height: 40, px: 1.5, border: `1.5px solid ${backendOk === false ? "rgba(244,67,54,0.3)" : "rgba(0,230,118,0.3)"}`, borderRadius: "10px", "& .MuiChip-icon": { color: backendOk === false ? "#ff6b6b" : "#00e676" } }}
               />
             </Tooltip>
             <Tooltip title={health?.gpu_name || "Processing device"}>
               <Chip
                 icon={<VideocamIcon sx={{ fontSize: 18 }} />}
                 label={health?.device ?? "?"}
-                sx={{ bgcolor: "rgba(0,217,255,0.12)", color: "#00d9ff", fontWeight: 800, fontSize: 14, height: 42, px: 1.5, border: "2px solid rgba(0,217,255,0.4)", "& .MuiChip-icon": { color: "#00d9ff" } }}
+                sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 700, fontSize: 13, height: 40, px: 1.5, border: "1.5px solid rgba(45,212,191,0.3)", borderRadius: "10px", "& .MuiChip-icon": { color: "#2dd4bf" } }}
               />
             </Tooltip>
             <Chip
               label={`${zones.length} Zones`}
-              sx={{ bgcolor: "rgba(255,255,255,0.1)", color: "#fff", fontWeight: 800, fontSize: 14, height: 42, px: 1.5, border: "2px solid rgba(255,255,255,0.25)" }}
+              sx={{ bgcolor: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.75)", fontWeight: 700, fontSize: 13, height: 40, px: 1.5, border: "1.5px solid rgba(255,255,255,0.12)", borderRadius: "10px" }}
             />
           </Stack>
 
@@ -685,72 +1196,83 @@ export default function App() {
 
           {/* Alert badge */}
           <Tooltip title={`${analysis.alerts_total ?? 0} total alerts`}>
-            <Badge badgeContent={emergencyCount} color="error" max={99} sx={{ "& .MuiBadge-badge": { bgcolor: "#ff1744", boxShadow: "0 0 15px rgba(255,23,68,0.7)", fontSize: 13, fontWeight: 800 } }}>
+            <Badge badgeContent={emergencyCount} color="error" max={99} sx={{ "& .MuiBadge-badge": { bgcolor: "#ff1744", boxShadow: "0 0 12px rgba(255,23,68,0.6)", fontSize: 12, fontWeight: 800 } }}>
               <Chip
                 icon={<NotificationsActiveIcon sx={{ fontSize: 20 }} />}
                 label={`${analysis.alerts_total ?? 0} Alerts`}
-                sx={{ bgcolor: emergencyCount > 0 ? "rgba(255,23,68,0.2)" : "rgba(255,171,0,0.15)", color: emergencyCount > 0 ? "#ff5252" : "#ffab00", fontWeight: 800, fontSize: 14, height: 42, px: 1.5, border: `2px solid ${emergencyCount > 0 ? "rgba(255,23,68,0.5)" : "rgba(255,171,0,0.4)"}`, "& .MuiChip-icon": { color: emergencyCount > 0 ? "#ff5252" : "#ffab00" } }}
+                sx={{ bgcolor: emergencyCount > 0 ? "rgba(255,23,68,0.15)" : "rgba(255,171,0,0.1)", color: emergencyCount > 0 ? "#ff6b6b" : "#ffc107", fontWeight: 700, fontSize: 13, height: 40, px: 1.5, border: `1.5px solid ${emergencyCount > 0 ? "rgba(255,23,68,0.35)" : "rgba(255,193,7,0.3)"}`, borderRadius: "10px", "& .MuiChip-icon": { color: emergencyCount > 0 ? "#ff6b6b" : "#ffc107" } }}
               />
             </Badge>
           </Tooltip>
 
-          <Divider orientation="vertical" flexItem sx={{ mx: 3, borderColor: "rgba(0,217,255,0.3)", height: 55, alignSelf: "center" }} />
+          <Divider orientation="vertical" flexItem sx={{ mx: 3, borderColor: "rgba(255,255,255,0.08)", height: 55, alignSelf: "center" }} />
 
           {/* Actions */}
-          <Tooltip title={soundEnabled ? "Mute alerts" : "Unmute alerts"}>
+          <Tooltip title={soundEnabled ? "Mute all voice alerts" : "Enable voice alerts"}>
             <IconButton
-              onClick={() => setSoundEnabled(s => !s)}
-              sx={{ color: soundEnabled ? "#00ff88" : "rgba(255,255,255,0.4)", bgcolor: soundEnabled ? "rgba(0,255,136,0.15)" : "rgba(255,255,255,0.1)", border: `2px solid ${soundEnabled ? "rgba(0,255,136,0.4)" : "rgba(255,255,255,0.2)"}`, width: 48, height: 48, "&:hover": { color: soundEnabled ? "#00ff88" : "#00d9ff", bgcolor: soundEnabled ? "rgba(0,255,136,0.25)" : "rgba(0,217,255,0.15)", borderColor: soundEnabled ? "rgba(0,255,136,0.6)" : "rgba(0,217,255,0.5)" } }}
+              onClick={() => {
+                setSoundEnabled(s => {
+                  if (s && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+                  return !s;
+                });
+              }}
+              sx={{ color: soundEnabled ? "#00e676" : "rgba(255,255,255,0.35)", bgcolor: soundEnabled ? "rgba(0,230,118,0.1)" : "rgba(255,255,255,0.06)", border: `1.5px solid ${soundEnabled ? "rgba(0,230,118,0.3)" : "rgba(255,255,255,0.1)"}`, borderRadius: "12px", width: 46, height: 46, "&:hover": { color: soundEnabled ? "#00e676" : "#2dd4bf", bgcolor: soundEnabled ? "rgba(0,230,118,0.18)" : "rgba(45,212,191,0.1)", borderColor: soundEnabled ? "rgba(0,230,118,0.5)" : "rgba(45,212,191,0.3)" } }}
             >
-              {soundEnabled ? <VolumeUpIcon sx={{ fontSize: 24 }} /> : <VolumeOffIcon sx={{ fontSize: 24 }} />}
+              {soundEnabled ? <VolumeUpIcon sx={{ fontSize: 22 }} /> : <VolumeOffIcon sx={{ fontSize: 22 }} />}
             </IconButton>
           </Tooltip>
 
           <Tooltip title={isFullscreen ? "Exit fullscreen" : "Fullscreen mode"}>
             <IconButton
               onClick={toggleFullscreen}
-              sx={{ color: "rgba(255,255,255,0.7)", bgcolor: "rgba(255,255,255,0.1)", border: "2px solid rgba(255,255,255,0.2)", width: 48, height: 48, "&:hover": { color: "#00d9ff", bgcolor: "rgba(0,217,255,0.15)", borderColor: "rgba(0,217,255,0.5)" } }}
+              sx={{ color: "rgba(255,255,255,0.5)", bgcolor: "rgba(255,255,255,0.06)", border: "1.5px solid rgba(255,255,255,0.1)", borderRadius: "12px", width: 46, height: 46, "&:hover": { color: "#2dd4bf", bgcolor: "rgba(45,212,191,0.1)", borderColor: "rgba(45,212,191,0.3)" } }}
             >
-              {isFullscreen ? <FullscreenExitIcon sx={{ fontSize: 24 }} /> : <FullscreenIcon sx={{ fontSize: 24 }} />}
+              {isFullscreen ? <FullscreenExitIcon sx={{ fontSize: 22 }} /> : <FullscreenIcon sx={{ fontSize: 22 }} />}
             </IconButton>
           </Tooltip>
 
           <Tooltip title="Export alerts to CSV">
             <IconButton
               onClick={exportToCSV}
-              sx={{ color: "rgba(255,255,255,0.7)", bgcolor: "rgba(255,255,255,0.1)", border: "2px solid rgba(255,255,255,0.2)", width: 48, height: 48, "&:hover": { color: "#00d9ff", bgcolor: "rgba(0,217,255,0.15)", borderColor: "rgba(0,217,255,0.5)" } }}
+              sx={{ color: "rgba(255,255,255,0.5)", bgcolor: "rgba(255,255,255,0.06)", border: "1.5px solid rgba(255,255,255,0.1)", borderRadius: "12px", width: 46, height: 46, "&:hover": { color: "#2dd4bf", bgcolor: "rgba(45,212,191,0.1)", borderColor: "rgba(45,212,191,0.3)" } }}
             >
-              <DownloadIcon sx={{ fontSize: 24 }} />
+              <DownloadIcon sx={{ fontSize: 22 }} />
             </IconButton>
           </Tooltip>
 
           <Tooltip title={autoAnnounce ? "Turn off auto announcements" : "Turn on auto announcements"}>
             <IconButton
-              onClick={() => setAutoAnnounce(prev => !prev)}
+              onClick={() => {
+                setAutoAnnounce(prev => {
+                  if (prev && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+                  return !prev;
+                });
+              }}
               sx={{ 
-                color: autoAnnounce ? (emergencyCount > 0 ? "#ff5252" : "#00ff88") : "rgba(255,255,255,0.4)", 
-                bgcolor: autoAnnounce ? (emergencyCount > 0 ? "rgba(255,82,82,0.15)" : "rgba(0,255,136,0.15)") : "rgba(255,255,255,0.1)", 
-                border: `2px solid ${autoAnnounce ? (emergencyCount > 0 ? "rgba(255,82,82,0.4)" : "rgba(0,255,136,0.4)") : "rgba(255,255,255,0.2)"}`, 
-                width: 48, 
-                height: 48, 
+                color: autoAnnounce ? (emergencyCount > 0 ? "#ff6b6b" : "#00e676") : "rgba(255,255,255,0.35)", 
+                bgcolor: autoAnnounce ? (emergencyCount > 0 ? "rgba(255,107,107,0.12)" : "rgba(0,230,118,0.1)") : "rgba(255,255,255,0.06)", 
+                border: `1.5px solid ${autoAnnounce ? (emergencyCount > 0 ? "rgba(255,107,107,0.3)" : "rgba(0,230,118,0.3)") : "rgba(255,255,255,0.1)"}`, 
+                borderRadius: "12px",
+                width: 46, 
+                height: 46, 
                 animation: autoAnnounce && emergencyCount > 0 ? "pulse 1.5s infinite" : "none",
                 "&:hover": { 
-                  color: autoAnnounce ? (emergencyCount > 0 ? "#ff5252" : "#00ff88") : "#00d9ff", 
-                  bgcolor: autoAnnounce ? (emergencyCount > 0 ? "rgba(255,82,82,0.25)" : "rgba(0,255,136,0.25)") : "rgba(0,217,255,0.15)", 
-                  borderColor: autoAnnounce ? (emergencyCount > 0 ? "rgba(255,82,82,0.6)" : "rgba(0,255,136,0.6)") : "rgba(0,217,255,0.5)" 
+                  color: autoAnnounce ? (emergencyCount > 0 ? "#ff6b6b" : "#00e676") : "#2dd4bf", 
+                  bgcolor: autoAnnounce ? (emergencyCount > 0 ? "rgba(255,107,107,0.2)" : "rgba(0,230,118,0.18)") : "rgba(45,212,191,0.1)", 
+                  borderColor: autoAnnounce ? (emergencyCount > 0 ? "rgba(255,107,107,0.5)" : "rgba(0,230,118,0.5)") : "rgba(45,212,191,0.3)" 
                 } 
               }}
             >
-              <NotificationsActiveIcon sx={{ fontSize: 24 }} />
+              <NotificationsActiveIcon sx={{ fontSize: 22 }} />
             </IconButton>
           </Tooltip>
 
           <Tooltip title="Reload zones">
             <IconButton
               onClick={() => fetch(`${API}/api/zones/reload`, { method: "POST" }).catch(() => {})}
-              sx={{ color: "rgba(255,255,255,0.7)", bgcolor: "rgba(255,255,255,0.1)", border: "2px solid rgba(255,255,255,0.2)", width: 48, height: 48, "&:hover": { color: "#00d9ff", bgcolor: "rgba(0,217,255,0.15)", borderColor: "rgba(0,217,255,0.5)" } }}
+              sx={{ color: "rgba(255,255,255,0.5)", bgcolor: "rgba(255,255,255,0.06)", border: "1.5px solid rgba(255,255,255,0.1)", borderRadius: "12px", width: 46, height: 46, "&:hover": { color: "#2dd4bf", bgcolor: "rgba(45,212,191,0.1)", borderColor: "rgba(45,212,191,0.3)" } }}
             >
-              <RefreshIcon sx={{ fontSize: 24 }} />
+              <RefreshIcon sx={{ fontSize: 22 }} />
             </IconButton>
           </Tooltip>
 
@@ -760,36 +1282,37 @@ export default function App() {
             onClick={() => {
               setPaused((p) => {
                 if (!p && 'speechSynthesis' in window) {
-                  window.speechSynthesis.cancel(); // Stop any ongoing speech when pausing
+                  window.speechSynthesis.cancel();
                 }
                 return !p;
               });
             }}
-            sx={{ background: paused ? "transparent" : "linear-gradient(135deg, #00d9ff 0%, #0096c7 100%)", borderColor: "#00d9ff", borderWidth: 2, color: paused ? "#00d9ff" : "#0d1b2a", fontWeight: 800, fontSize: 15, textTransform: "none", px: 4, py: 1.3, borderRadius: 2, boxShadow: paused ? "none" : "0 4px 30px rgba(0,217,255,0.5)", "&:hover": { borderWidth: 2, background: paused ? "rgba(0,217,255,0.15)" : "linear-gradient(135deg, #0096c7 0%, #0077b6 100%)" } }}
+            sx={{ background: paused ? "transparent" : "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", borderColor: "#2dd4bf", borderWidth: 2, color: paused ? "#2dd4bf" : "#071520", fontWeight: 800, fontSize: 14, textTransform: "none", px: 4, py: 1.2, borderRadius: "12px", boxShadow: paused ? "none" : "0 4px 24px rgba(45,212,191,0.35)", "&:hover": { borderWidth: 2, background: paused ? "rgba(45,212,191,0.12)" : "linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)" } }}
           >
             {paused ? "Resume" : "Pause All"}
           </Button>
         </Toolbar>
 
-        {/* Tabs - Separated section with subtle glassmorphism */}
-        <Box sx={{ bgcolor: "rgba(10,20,32,0.95)", borderRadius: { xs: 0, md: "0 0 14px 14px" }, position: "relative", "&::before": { content: '""', position: "absolute", top: 0, left: "3%", right: "3%", height: "1px", background: "linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.1) 20%, rgba(255,255,255,0.2) 50%, rgba(255,255,255,0.1) 80%, transparent 100%)" } }}>
+        {/* Tabs - Sleek dark strip with gold accent */}
+        <Box sx={{ background: "rgba(255,255,255,0.02)", borderRadius: { xs: 0, md: "0 0 14px 14px" }, borderTop: "1px solid rgba(255,255,255,0.04)" }}>
           <Tabs
             value={tab}
             onChange={(_, v) => setTab(v)}
             textColor="inherit"
-            TabIndicatorProps={{ style: { background: "linear-gradient(90deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0.5) 50%, rgba(255,255,255,0.2) 100%)", height: 2, borderRadius: 2 } }}
-            sx={{ px: { xs: 2, md: 5 }, minHeight: 58, "& .MuiTab-root": { minHeight: 58, textTransform: "none", fontWeight: 700, fontSize: 15, color: "rgba(255,255,255,0.5)", gap: 1.5, px: 4, transition: "all 0.2s", "&:hover": { color: "#fff", bgcolor: "rgba(255,255,255,0.03)" }, "&.Mui-selected": { color: "#fff" } } }}
+            TabIndicatorProps={{ style: { background: "linear-gradient(90deg, transparent, #2dd4bf, transparent)", height: 2.5, borderRadius: 2 } }}
+            sx={{ px: { xs: 2, md: 5 }, minHeight: 52, "& .MuiTab-root": { minHeight: 52, textTransform: "none", fontWeight: 600, fontSize: 13.5, color: "rgba(255,255,255,0.35)", letterSpacing: 0.5, gap: 1.5, px: 3, mx: 0.5, my: 0.5, borderRadius: "10px", transition: "all 0.25s ease", "&:hover": { color: "rgba(255,255,255,0.75)", bgcolor: "rgba(255,255,255,0.04)" }, "&.Mui-selected": { color: "#5eead4", bgcolor: "rgba(45,212,191,0.08)", fontWeight: 700 } } }}
           >
-            <Tab icon={<DashboardIcon sx={{ fontSize: 22 }} />} iconPosition="start" label="Dashboard" />
-            <Tab icon={<AnalyticsIcon sx={{ fontSize: 22 }} />} iconPosition="start" label="Analytics" />
-            <Tab icon={<HistoryIcon sx={{ fontSize: 22 }} />} iconPosition="start" label="Event Logs" />
-            <Tab icon={<SettingsIcon sx={{ fontSize: 22 }} />} iconPosition="start" label="Settings" />
+            <Tab icon={<DashboardIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Dashboard" />
+            <Tab icon={<AnalyticsIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Analytics" />
+            <Tab icon={<HistoryIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Event Logs" />
+            <Tab icon={<SettingsIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Settings" />
+            <Tab icon={<VideoLibraryIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Videos" />
           </Tabs>
         </Box>
       </AppBar>
 
-      {/* CONTENT AREA - Lighter background */}
-      <Box sx={{ p: { xs: 2, md: 5 }, pt: { xs: 3, md: 5 }, maxWidth: 2000, mx: "auto", minHeight: "calc(100vh - 180px)" }}>
+      {/* CONTENT AREA */}
+      <Box sx={{ p: { xs: 2, md: 5 }, pt: { xs: 3, md: 5 }, maxWidth: 2000, mx: "auto", minHeight: "calc(100vh - 180px)", position: "relative", zIndex: 1 }}>
         {tab === 0 && (
           <Box>
             {/* Stats Row */}
@@ -802,7 +1325,7 @@ export default function App() {
               ].map((stat) => (
                 <Box
                   key={stat.label}
-                  sx={{ p: 3.5, borderRadius: 3, bgcolor: "#161d28", border: "1px solid rgba(255,255,255,0.1)", display: "flex", alignItems: "center", gap: 3, transition: "all 0.3s", "&:hover": { bgcolor: "#1a242f", borderColor: `${stat.color}60`, transform: "translateY(-3px)", boxShadow: `0 12px 40px ${stat.color}20` } }}
+                  sx={{ p: 3.5, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", gap: 3, transition: "all 0.3s", boxShadow: "0 4px 24px rgba(0,0,0,0.3)", "&:hover": { bgcolor: "#131f2b", borderColor: `${stat.color}40`, transform: "translateY(-3px)", boxShadow: `0 12px 40px ${stat.color}15` } }}
                 >
                   <Avatar sx={{ bgcolor: `${stat.color}20`, color: stat.color, width: 60, height: 60, boxShadow: `0 0 25px ${stat.color}30` }}>{React.cloneElement(stat.icon, { sx: { fontSize: 30 } })}</Avatar>
                   <Box>
@@ -817,26 +1340,26 @@ export default function App() {
             <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 4, mt: 2 }}>
               <Box>
                 <Typography sx={{ fontWeight: 900, fontSize: 26, color: "#fff", display: "flex", alignItems: "center", gap: 2 }}>
-                  <VideocamIcon sx={{ color: "#00d9ff", fontSize: 32 }} />
+                  <VideocamIcon sx={{ color: "#2dd4bf", fontSize: 32 }} />
                   Live Zone Feeds
                 </Typography>
                 <Typography sx={{ fontSize: 15, color: "rgba(255,255,255,0.5)", mt: 0.5, ml: 6 }}>Real-time surveillance monitoring across all beach zones</Typography>
               </Box>
-              <Chip label={`${zones.length} Active`} sx={{ bgcolor: "rgba(0,217,255,0.12)", color: "#00d9ff", fontWeight: 800, fontSize: 14, height: 36, px: 1, border: "2px solid rgba(0,217,255,0.4)" }} />
+              <Chip label={`${zones.length} Active`} sx={{ bgcolor: "rgba(45,212,191,0.12)", color: "#2dd4bf", fontWeight: 800, fontSize: 14, height: 36, px: 1, border: "2px solid rgba(45,212,191,0.35)" }} />
             </Box>
 
             {/* Zone Grid */}
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "repeat(2, 1fr)", lg: "repeat(3, 1fr)", xl: "repeat(3, 1fr)" }, gap: 4 }}>
             {zones.length === 0 ? (
-              <Box sx={{ display: "flex", flexDirection: "column", gap: 3, alignItems: "center", justifyContent: "center", textAlign: "center", gridColumn: "1/-1", py: 14, borderRadius: 4, bgcolor: "#141e29", border: "2px dashed rgba(0,217,255,0.35)" }}>
-                <Avatar sx={{ bgcolor: "rgba(0,217,255,0.15)", width: 90, height: 90, boxShadow: "0 0 40px rgba(0,217,255,0.3)" }}>
-                  <VideocamIcon sx={{ fontSize: 45, color: "#00d9ff" }} />
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 3, alignItems: "center", justifyContent: "center", textAlign: "center", gridColumn: "1/-1", py: 14, borderRadius: 4, bgcolor: "#0f1923", border: "2px dashed rgba(255,255,255,0.1)" }}>
+                <Avatar sx={{ bgcolor: "rgba(45,212,191,0.15)", width: 90, height: 90, boxShadow: "0 0 40px rgba(45,212,191,0.2)" }}>
+                  <VideocamIcon sx={{ fontSize: 45, color: "#2dd4bf" }} />
                 </Avatar>
                 <Box>
                   <Typography sx={{ fontWeight: 900, fontSize: 26, color: "#fff" }}>No Zones Detected</Typography>
-                  <Typography sx={{ color: "rgba(255,255,255,0.5)", maxWidth: 480, mt: 1.5, fontSize: 16 }}>Add video files named zone1.mp4, zone2.mp4, etc. to the videos folder, then click the refresh button.</Typography>
+                  <Typography sx={{ color: "rgba(255,255,255,0.5)", maxWidth: 480, mt: 1.5, fontSize: 16 }}>Drop any video file into the Videos tab to get started, or add files to the videos folder and click reload.</Typography>
                 </Box>
-                <Button startIcon={<RefreshIcon />} variant="contained" onClick={() => fetch(`${API}/api/zones/reload`, { method: "POST" })} sx={{ mt: 2, background: "linear-gradient(135deg, #00d9ff 0%, #0096c7 100%)", color: "#0d1b2a", fontWeight: 800, px: 5, py: 1.5, fontSize: 15, boxShadow: "0 4px 30px rgba(0,217,255,0.4)", "&:hover": { background: "linear-gradient(135deg, #0096c7 0%, #0077b6 100%)" } }}>Reload Zones</Button>
+                <Button startIcon={<RefreshIcon />} variant="contained" onClick={() => fetch(`${API}/api/zones/reload`, { method: "POST" })} sx={{ mt: 2, background: "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", color: "#071520", fontWeight: 800, px: 5, py: 1.5, fontSize: 15, boxShadow: "0 4px 30px rgba(45,212,191,0.35)", "&:hover": { background: "linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)" } }}>Reload Zones</Button>
               </Box>
             ) : (
               zones.map((z) => {
@@ -848,24 +1371,25 @@ export default function App() {
                   <Card
                     key={z}
                     elevation={0}
-                    onClick={() => setOpenZone(z)}
+                    onClick={() => { setModalBlobUrl(`${API}/api/zones/${z}/frame.jpg?t=${Date.now()}`); setOpenZone(z); }}
                     sx={{
                       cursor: "pointer",
-                      bgcolor: "#141e29",
-                      border: "1px solid rgba(0,217,255,0.15)",
+                      bgcolor: "#0f1923",
+                      border: "1px solid rgba(255,255,255,0.06)",
                       borderRadius: 4,
                       overflow: "hidden",
                       transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-                      "&:hover": { borderColor: "rgba(0,217,255,0.6)", transform: "translateY(-5px)", boxShadow: "0 25px 70px rgba(0,217,255,0.2)" },
+                      boxShadow: "0 4px 30px rgba(0,0,0,0.3)",
+                      "&:hover": { borderColor: "rgba(255,255,255,0.12)", transform: "translateY(-4px)", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" },
                     }}
                   >
                     {/* Zone Header with Label */}
-                    <Box sx={{ p: 2.5, borderBottom: "1px solid rgba(0,217,255,0.1)", display: "flex", alignItems: "center", justifyContent: "space-between", bgcolor: "rgba(0,217,255,0.03)" }}>
+                    <Box sx={{ p: 2.5, borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", alignItems: "center", justifyContent: "space-between", bgcolor: "rgba(255,255,255,0.02)" }}>
                       <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                        <Avatar sx={{ background: "linear-gradient(135deg, #00d9ff 0%, #0096c7 100%)", width: 48, height: 48, fontSize: 18, fontWeight: 900, boxShadow: "0 4px 20px rgba(0,217,255,0.4)" }}>{z}</Avatar>
+                        <Avatar sx={{ background: "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", width: 48, height: 48, fontSize: 18, fontWeight: 900, color: "#071520", boxShadow: "0 4px 20px rgba(45,212,191,0.3)" }}>{z}</Avatar>
                         <Box>
                           <Typography sx={{ fontWeight: 900, fontSize: 20, letterSpacing: -0.3, color: "#fff" }}>Zone {z}</Typography>
-                          <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.5)", fontWeight: 600 }}>{exists ? "Live Surveillance Feed" : "No Video Source"}</Typography>
+                          <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 600, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={meta.filename || ""}>{exists ? (meta.filename || "Live Feed") : "No Video Source"}</Typography>
                         </Box>
                       </Box>
                       <Chip
@@ -881,7 +1405,7 @@ export default function App() {
                       <ZoneCardPlayback zid={z} paused={paused} />
 
                       {(!exists || showError) && (
-                        <Box sx={{ position: "absolute", inset: 0, zIndex: 4, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", bgcolor: "rgba(6,13,24,.95)", px: 3, textAlign: "center" }}>
+                        <Box sx={{ position: "absolute", inset: 0, zIndex: 4, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", bgcolor: "rgba(7,21,32,.93)", backdropFilter: "blur(8px)", px: 3, textAlign: "center" }}>
                           <Avatar sx={{ bgcolor: "rgba(255,171,0,0.15)", width: 64, height: 64, mb: 2 }}>
                             <WarningAmberIcon sx={{ fontSize: 32, color: "#ffab00" }} />
                           </Avatar>
@@ -904,54 +1428,54 @@ export default function App() {
             <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 4 }}>
               <Box>
                 <Typography sx={{ fontWeight: 900, fontSize: 28, color: "#fff", display: "flex", alignItems: "center", gap: 2 }}>
-                  <Box sx={{ p: 1.5, borderRadius: 2, background: "linear-gradient(135deg, rgba(0,217,255,0.2) 0%, rgba(0,217,255,0.05) 100%)", display: "flex", border: "1px solid rgba(0,217,255,0.2)" }}>
-                    <AnalyticsIcon sx={{ color: "#00d9ff", fontSize: 28 }} />
+                  <Box sx={{ p: 1.5, borderRadius: 2, background: "linear-gradient(135deg, rgba(45,212,191,0.2) 0%, rgba(45,212,191,0.05) 100%)", display: "flex", border: "1px solid rgba(45,212,191,0.15)" }}>
+                    <AnalyticsIcon sx={{ color: "#2dd4bf", fontSize: 28 }} />
                   </Box>
                   Analytics Dashboard
                 </Typography>
                 <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 14, mt: 1, ml: 7 }}>Real-time surveillance insights</Typography>
               </Box>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1, px: 2, py: 1, borderRadius: 2, bgcolor: "rgba(0,255,136,0.08)", border: "1px solid rgba(0,255,136,0.2)" }}>
-                <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: "#00ff88", animation: "pulse 1.5s infinite" }} />
-                <Typography sx={{ fontSize: 12, color: "#00ff88", fontWeight: 600 }}>LIVE</Typography>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, px: 2, py: 1, borderRadius: 2, bgcolor: "rgba(52,211,153,0.08)", border: "1px solid rgba(52,211,153,0.2)" }}>
+                <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: "#34d399", animation: "pulse 1.5s infinite" }} />
+                <Typography sx={{ fontSize: 12, color: "#34d399", fontWeight: 600 }}>LIVE</Typography>
               </Box>
             </Box>
 
             {/* Key Metrics Row */}
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "repeat(2, 1fr)", lg: "repeat(4, 1fr)" }, gap: 3, mb: 4 }}>
               {[
-                { title: "Total Detections", value: analysis.alerts_total ?? 0, icon: "📊", gradient: "linear-gradient(135deg, #00d9ff 0%, #0099cc 100%)" },
-                { title: "Monitored Zones", value: zones.length, icon: "🎯", gradient: "linear-gradient(135deg, #00ff88 0%, #00cc6a 100%)" },
-                { title: "Emergency Alerts", value: emergencyCount, icon: "🚨", gradient: "linear-gradient(135deg, #ff5252 0%, #cc4141 100%)" },
-                { title: "Avg Confidence", value: `${((alerts.items?.reduce((a, b) => a + (b.conf || 0), 0) / Math.max(1, alerts.items?.length || 1)) * 100).toFixed(0)}%`, icon: "⚡", gradient: "linear-gradient(135deg, #ffab00 0%, #ff8f00 100%)" },
+                { title: "Total Detections", value: analysis.alerts_total ?? 0, icon: "📊", gradient: "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", accent: "#2dd4bf" },
+                { title: "Monitored Zones", value: zones.length, icon: "🎯", gradient: "linear-gradient(135deg, #34d399 0%, #10b981 100%)", accent: "#34d399" },
+                { title: "Emergency Alerts", value: emergencyCount, icon: "🚨", gradient: "linear-gradient(135deg, #ff5252 0%, #cc4141 100%)", accent: "#ff5252" },
+                { title: "Avg Confidence", value: `${((alerts.items?.reduce((a, b) => a + (b.conf || 0), 0) / Math.max(1, alerts.items?.length || 1)) * 100).toFixed(0)}%`, icon: "⚡", gradient: "linear-gradient(135deg, #ffab00 0%, #ff8f00 100%)", accent: "#ffab00" },
               ].map((card) => (
-                <Box key={card.title} sx={{ p: 3, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", transition: "all 0.3s ease", "&:hover": { transform: "translateY(-4px)", boxShadow: "0 12px 40px rgba(0,0,0,0.4)" } }}>
+                <Box key={card.title} sx={{ p: 3, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", transition: "all 0.3s ease", boxShadow: "0 4px 20px rgba(0,0,0,0.25)", "&:hover": { transform: "translateY(-4px)", boxShadow: "0 12px 40px rgba(0,0,0,0.4)", borderColor: "rgba(255,255,255,0.12)" } }}>
                   <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2 }}>
                     <Box sx={{ p: 1.5, borderRadius: 2, background: card.gradient, boxShadow: "0 4px 15px rgba(0,0,0,0.3)" }}>
-                      <Typography sx={{ fontSize: 20 }}>{card.icon}</Typography>
+                      <Typography sx={{ fontSize: 24 }}>{card.icon}</Typography>
                     </Box>
                   </Box>
-                  <Typography sx={{ fontSize: 36, fontWeight: 900, color: "#fff", lineHeight: 1 }}>{card.value}</Typography>
-                  <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.5)", fontWeight: 600, mt: 1 }}>{card.title}</Typography>
+                  <Typography sx={{ fontSize: 48, fontWeight: 900, color: "#fff", lineHeight: 1, letterSpacing: "-1px" }}>{card.value}</Typography>
+                  <Typography sx={{ fontSize: 15, color: "rgba(255,255,255,0.5)", fontWeight: 600, mt: 1.5 }}>{card.title}</Typography>
                 </Box>
               ))}
             </Box>
 
             {/* Main Charts Grid - Pie Chart and Bar Chart */}
-            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "400px 1fr" }, gap: 4, mb: 4 }}>
+            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "420px 1fr" }, gap: 4, mb: 4 }}>
               
               {/* Professional Pie Chart - Detection Types */}
-              <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)" }}>
+              <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
                 <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 4 }}>
-                  <Typography sx={{ fontWeight: 800, fontSize: 18, color: "#fff" }}>Detection Types</Typography>
-                  <Chip label="Distribution" size="small" sx={{ bgcolor: "rgba(0,217,255,0.1)", color: "#00d9ff", fontWeight: 600, fontSize: 10, height: 24 }} />
+                  <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Detection Types</Typography>
+                  <Chip label="Distribution" size="small" sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 600, fontSize: 12, height: 26 }} />
                 </Box>
                 
                 {Object.keys(analysis.alerts_by_label || {}).length > 0 ? (
                   <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
                     {/* SVG Pie Chart */}
-                    <Box sx={{ position: "relative", width: 180, height: 180 }}>
-                      <svg width="180" height="180" viewBox="0 0 100 100">
+                    <Box sx={{ position: "relative", width: 240, height: 240 }}>
+                      <svg width="240" height="240" viewBox="0 0 100 100">
                         <defs>
                           <filter id="pieGlow" x="-50%" y="-50%" width="200%" height="200%">
                             <feGaussianBlur stdDeviation="1.5" result="glow"/>
@@ -962,7 +1486,7 @@ export default function App() {
                         {(() => {
                           const entries = Object.entries(analysis.alerts_by_label || {});
                           const total = entries.reduce((a, [, v]) => a + v, 0);
-                          const colors = ["#00d9ff", "#ff5252", "#00ff88", "#ffab00", "#a855f7"];
+                          const colors = ["#2dd4bf", "#ff5252", "#34d399", "#f59e0b", "#a78bfa"];
                           let cumulative = 0;
                           return entries.map(([label, count], i) => {
                             const pct = (count / total) * 100;
@@ -988,8 +1512,8 @@ export default function App() {
                         <circle cx="50" cy="50" r="30" fill="#0f1923" />
                       </svg>
                       <Box sx={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                        <Typography sx={{ fontSize: 32, fontWeight: 900, color: "#fff", lineHeight: 1 }}>{analysis.alerts_total ?? 0}</Typography>
-                        <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.4)", fontWeight: 600, mt: 0.5 }}>TOTAL</Typography>
+                        <Typography sx={{ fontSize: 42, fontWeight: 900, color: "#fff", lineHeight: 1, letterSpacing: "-1px" }}>{analysis.alerts_total ?? 0}</Typography>
+                        <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.45)", fontWeight: 700, mt: 0.5, letterSpacing: "2px" }}>TOTAL</Typography>
                       </Box>
                     </Box>
                     
@@ -998,16 +1522,16 @@ export default function App() {
                       {(() => {
                         const entries = Object.entries(analysis.alerts_by_label || {});
                         const total = entries.reduce((a, [, v]) => a + v, 0);
-                        const colors = ["#00d9ff", "#ff5252", "#00ff88", "#ffab00", "#a855f7"];
+                        const colors = ["#2dd4bf", "#ff5252", "#34d399", "#f59e0b", "#a78bfa"];
                         return entries.map(([label, count], i) => {
                           const pct = ((count / total) * 100).toFixed(0);
                           const isEmergency = label.toLowerCase().includes("drown") || label.toLowerCase().includes("emerg");
                           return (
-                            <Box key={label} sx={{ display: "flex", alignItems: "center", gap: 2, p: 1.5, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", transition: "all 0.2s", "&:hover": { bgcolor: "rgba(255,255,255,0.04)" } }}>
-                              <Box sx={{ width: 10, height: 10, borderRadius: 1, bgcolor: colors[i % colors.length] }} />
-                              <Typography sx={{ flex: 1, fontSize: 13, fontWeight: 600, color: "rgba(255,255,255,0.8)", textTransform: "capitalize" }}>{label}</Typography>
-                              <Typography sx={{ fontSize: 14, fontWeight: 800, color: colors[i % colors.length] }}>{count}</Typography>
-                              <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.4)", minWidth: 35 }}>{pct}%</Typography>
+                            <Box key={label} sx={{ display: "flex", alignItems: "center", gap: 2, p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", transition: "all 0.2s", "&:hover": { bgcolor: "rgba(255,255,255,0.04)" } }}>
+                              <Box sx={{ width: 12, height: 12, borderRadius: 1, bgcolor: colors[i % colors.length] }} />
+                              <Typography sx={{ flex: 1, fontSize: 15, fontWeight: 600, color: "rgba(255,255,255,0.8)", textTransform: "capitalize" }}>{label}</Typography>
+                              <Typography sx={{ fontSize: 18, fontWeight: 800, color: colors[i % colors.length] }}>{count}</Typography>
+                              <Typography sx={{ fontSize: 14, color: "rgba(255,255,255,0.5)", minWidth: 40, fontWeight: 600 }}>{pct}%</Typography>
                               {isEmergency && <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "#ff5252", animation: "pulse 1s infinite" }} />}
                             </Box>
                           );
@@ -1026,20 +1550,20 @@ export default function App() {
               </Box>
 
               {/* Professional Bar Chart - Zone Activity */}
-              <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)" }}>
+              <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
                 <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 4 }}>
-                  <Typography sx={{ fontWeight: 800, fontSize: 18, color: "#fff" }}>Zone Activity</Typography>
-                  <Chip label={`${zones.length} Zones`} size="small" sx={{ bgcolor: "rgba(0,255,136,0.1)", color: "#00ff88", fontWeight: 600, fontSize: 10, height: 24 }} />
+                  <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Zone Activity</Typography>
+                  <Chip label={`${zones.length} Zones`} size="small" sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 600, fontSize: 12, height: 26 }} />
                 </Box>
                 
                 {zones.length > 0 ? (
                   <Box>
-                    <Box sx={{ display: "flex", gap: 2, height: 260 }}>
+                    <Box sx={{ display: "flex", gap: 2, height: 320 }}>
                       <Box sx={{ display: "flex", flexDirection: "column", justifyContent: "space-between", py: 1, pr: 1 }}>
                         {(() => {
                           const maxCount = Math.max(...Object.values(analysis.alerts_by_zone || { default: 0 }), 1);
                           return [maxCount, Math.round(maxCount * 0.75), Math.round(maxCount * 0.5), Math.round(maxCount * 0.25), 0].map((val) => (
-                            <Typography key={val} sx={{ fontSize: 10, color: "rgba(255,255,255,0.3)", minWidth: 20, textAlign: "right" }}>{val}</Typography>
+                            <Typography key={val} sx={{ fontSize: 13, color: "rgba(255,255,255,0.4)", minWidth: 28, textAlign: "right", fontWeight: 600 }}>{val}</Typography>
                           ));
                         })()}
                       </Box>
@@ -1052,15 +1576,16 @@ export default function App() {
                         <Box sx={{ display: "flex", alignItems: "flex-end", height: "100%", gap: 2, px: 2, pb: 0.5 }}>
                           {(() => {
                             const maxCount = Math.max(...Object.values(analysis.alerts_by_zone || { default: 1 }), 1);
-                            const colors = ["#00d9ff", "#00ff88", "#ffab00", "#a855f7", "#f472b6", "#22d3ee"];
+                            const colors = ["#2dd4bf", "#34d399", "#f59e0b", "#a78bfa", "#f472b6", "#22d3ee"];
                             return zones.map((zone, idx) => {
                               const count = (analysis.alerts_by_zone || {})[zone] || 0;
                               const height = (count / maxCount) * 100;
                               const color = colors[idx % colors.length];
                               return (
                                 <Box key={zone} sx={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", height: "100%" }}>
-                                  <Box sx={{ flex: 1, width: "100%", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
-                                    <Box sx={{ width: "70%", maxWidth: 50, height: `${height}%`, minHeight: count > 0 ? 8 : 2, background: `linear-gradient(180deg, ${color} 0%, ${color}70 100%)`, borderRadius: "4px 4px 0 0", boxShadow: count > 0 ? `0 0 20px ${color}30` : "none", transition: "all 0.5s ease", position: "relative", "&::before": count > 0 ? { content: '""', position: "absolute", top: 0, left: 0, right: 0, height: "40%", background: "linear-gradient(180deg, rgba(255,255,255,0.25) 0%, transparent 100%)", borderRadius: "4px 4px 0 0" } : {}, "&:hover": { transform: "scaleY(1.02)", boxShadow: `0 0 30px ${color}50` } }} />
+                                  <Box sx={{ flex: 1, width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end" }}>
+                                    {count > 0 && <Typography sx={{ fontSize: 14, fontWeight: 800, color: color, mb: 0.5 }}>{count}</Typography>}
+                                    <Box sx={{ width: "75%", maxWidth: 56, height: `${height}%`, minHeight: count > 0 ? 12 : 3, background: `linear-gradient(180deg, ${color} 0%, ${color}70 100%)`, borderRadius: "6px 6px 0 0", boxShadow: count > 0 ? `0 0 20px ${color}30` : "none", transition: "all 0.5s ease", position: "relative", "&::before": count > 0 ? { content: '""', position: "absolute", top: 0, left: 0, right: 0, height: "40%", background: "linear-gradient(180deg, rgba(255,255,255,0.25) 0%, transparent 100%)", borderRadius: "6px 6px 0 0" } : {}, "&:hover": { transform: "scaleY(1.05)", boxShadow: `0 0 30px ${color}50` } }} />
                                   </Box>
                                 </Box>
                               );
@@ -1069,27 +1594,25 @@ export default function App() {
                         </Box>
                       </Box>
                     </Box>
-                    <Box sx={{ display: "flex", pl: 4, mt: 1 }}>
+                    <Box sx={{ display: "flex", pl: 4, mt: 1.5 }}>
                       {zones.map((zone, idx) => {
-                        const count = (analysis.alerts_by_zone || {})[zone] || 0;
-                        const colors = ["#00d9ff", "#00ff88", "#ffab00", "#a855f7", "#f472b6", "#22d3ee"];
+                        const colors = ["#2dd4bf", "#34d399", "#f59e0b", "#a78bfa", "#f472b6", "#22d3ee"];
                         return (
                           <Box key={zone} sx={{ flex: 1, textAlign: "center" }}>
-                            <Typography sx={{ fontSize: 11, color: colors[idx % colors.length], fontWeight: 700 }}>Z{zone}</Typography>
-                            <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.4)", mt: 0.25 }}>{count}</Typography>
+                            <Typography sx={{ fontSize: 14, color: colors[idx % colors.length], fontWeight: 800 }}>Zone {zone}</Typography>
                           </Box>
                         );
                       })}
                     </Box>
                     <Box sx={{ display: "flex", gap: 2, mt: 3, pt: 3, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
                       {[
-                        { label: "Most Active", value: Object.entries(analysis.alerts_by_zone || {}).sort((a, b) => b[1] - a[1])[0]?.[0] ? `Zone ${Object.entries(analysis.alerts_by_zone || {}).sort((a, b) => b[1] - a[1])[0]?.[0]}` : "—", color: "#00d9ff" },
-                        { label: "Avg/Zone", value: zones.length > 0 ? ((analysis.alerts_total || 0) / zones.length).toFixed(1) : "0", color: "#00ff88" },
+                        { label: "Most Active", value: Object.entries(analysis.alerts_by_zone || {}).sort((a, b) => b[1] - a[1])[0]?.[0] ? `Zone ${Object.entries(analysis.alerts_by_zone || {}).sort((a, b) => b[1] - a[1])[0]?.[0]}` : "—", color: "#2dd4bf" },
+                        { label: "Avg/Zone", value: zones.length > 0 ? ((analysis.alerts_total || 0) / zones.length).toFixed(1) : "0", color: "#34d399" },
                         { label: "Coverage", value: zones.length > 0 ? `${((Object.keys(analysis.alerts_by_zone || {}).length / zones.length) * 100).toFixed(0)}%` : "0%", color: "#ffab00" },
                       ].map((stat) => (
-                        <Box key={stat.label} sx={{ flex: 1, p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", textAlign: "center" }}>
-                          <Typography sx={{ fontSize: 16, fontWeight: 800, color: stat.color }}>{stat.value}</Typography>
-                          <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.4)", mt: 0.5 }}>{stat.label}</Typography>
+                        <Box key={stat.label} sx={{ flex: 1, p: 2.5, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", textAlign: "center" }}>
+                          <Typography sx={{ fontSize: 24, fontWeight: 900, color: stat.color, letterSpacing: "-0.5px" }}>{stat.value}</Typography>
+                          <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.5)", mt: 0.5, fontWeight: 600 }}>{stat.label}</Typography>
                         </Box>
                       ))}
                     </Box>
@@ -1105,16 +1628,79 @@ export default function App() {
               </Box>
             </Box>
 
+            {/* Detection Moments Timeline */}
+            <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)", mb: 4 }}>
+              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 3 }}>
+                <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Detection Moments</Typography>
+                <Chip label="Timeline" size="small" sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 600, fontSize: 12, height: 26 }} />
+              </Box>
+              {(alerts.items || []).length > 0 ? (
+                <Box>
+                  {/* Timeline bars - last 30 events bucketed by minute */}
+                  <Box sx={{ display: "flex", alignItems: "flex-end", gap: "3px", height: 120, mb: 2, px: 1 }}>
+                    {(() => {
+                      const items = alerts.items || [];
+                      // Create time buckets from the last 30 items
+                      const recent = items.slice(0, 30).reverse();
+                      const maxPerSlot = recent.length > 0 ? Math.max(1, ...recent.map(() => 1)) : 1;
+                      return recent.map((item, idx) => {
+                        const isEmergency = String(item.label || "").toLowerCase().includes("drown") || String(item.label || "").toLowerCase().includes("emerg");
+                        const color = isEmergency ? "#ff5252" : "#2dd4bf";
+                        const conf = (item.conf || 0.5);
+                        const h = Math.max(15, conf * 100);
+                        return (
+                          <Box key={idx} sx={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                            <Box sx={{ width: "100%", height: `${h}%`, minHeight: 8, maxWidth: 24, bgcolor: color, borderRadius: "3px 3px 0 0", opacity: 0.5 + conf * 0.5, transition: "all 0.3s", cursor: "pointer", "&:hover": { opacity: 1, transform: "scaleY(1.1)" }, position: "relative" }}>
+                              <Box sx={{ position: "absolute", top: -20, left: "50%", transform: "translateX(-50%)", opacity: 0, transition: "opacity 0.2s", "&:hover": { opacity: 1 }, whiteSpace: "nowrap" }}>
+                                <Typography sx={{ fontSize: 10, color: "#fff", bgcolor: "rgba(0,0,0,0.8)", px: 1, py: 0.25, borderRadius: 1 }}>{item.label}</Typography>
+                              </Box>
+                            </Box>
+                          </Box>
+                        );
+                      });
+                    })()}
+                  </Box>
+                  <Box sx={{ display: "flex", justifyContent: "space-between", px: 1 }}>
+                    <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.3)", fontWeight: 600 }}>Earliest</Typography>
+                    <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.3)", fontWeight: 600 }}>Most Recent</Typography>
+                  </Box>
+                  {/* Detection type breakdown row */}
+                  <Box sx={{ display: "flex", gap: 2, mt: 3, pt: 3, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+                    {(() => {
+                      const items = alerts.items || [];
+                      const drowningCount = items.filter(i => String(i.label || "").toLowerCase().includes("drown")).length;
+                      const normalCount = items.length - drowningCount;
+                      return [
+                        { label: "Normal Detections", value: normalCount, color: "#2dd4bf", icon: "👀" },
+                        { label: "Emergency Events", value: drowningCount, color: "#ff5252", icon: "🚨" },
+                        { label: "Total Events", value: items.length, color: "#34d399", icon: "📊" },
+                      ].map(s => (
+                        <Box key={s.label} sx={{ flex: 1, p: 2.5, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", textAlign: "center", border: "1px solid rgba(255,255,255,0.04)" }}>
+                          <Typography sx={{ fontSize: 16, mb: 0.5 }}>{s.icon}</Typography>
+                          <Typography sx={{ fontSize: 28, fontWeight: 900, color: s.color, letterSpacing: "-0.5px" }}>{s.value}</Typography>
+                          <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.4)", mt: 0.5, fontWeight: 600 }}>{s.label}</Typography>
+                        </Box>
+                      ));
+                    })()}
+                  </Box>
+                </Box>
+              ) : (
+                <Box sx={{ py: 6, textAlign: "center" }}>
+                  <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 14 }}>No detection moments recorded yet</Typography>
+                </Box>
+              )}
+            </Box>
+
             {/* Live Activity Feed */}
-            <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)" }}>
+            <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
               <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 3 }}>
                 <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                  <Typography sx={{ fontWeight: 800, fontSize: 18, color: "#fff" }}>Recent Activity</Typography>
-                  <Chip label={`${(alerts.items || []).length} Events`} size="small" sx={{ bgcolor: "rgba(255,255,255,0.05)", color: "rgba(255,255,255,0.6)", fontWeight: 600, fontSize: 10, height: 22 }} />
+                  <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Recent Activity</Typography>
+                  <Chip label={`${(alerts.items || []).length} Events`} size="small" sx={{ bgcolor: "rgba(255,255,255,0.05)", color: "rgba(255,255,255,0.6)", fontWeight: 600, fontSize: 12, height: 24 }} />
                 </Box>
                 <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                  <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "#00ff88", animation: "pulse 1.5s infinite" }} />
-                  <Typography sx={{ fontSize: 11, color: "#00ff88", fontWeight: 600 }}>LIVE</Typography>
+                  <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "#34d399", animation: "pulse 1.5s infinite" }} />
+                  <Typography sx={{ fontSize: 11, color: "#34d399", fontWeight: 600 }}>LIVE</Typography>
                 </Box>
               </Box>
               
@@ -1122,14 +1708,14 @@ export default function App() {
                 {(alerts.items || []).length > 0 ? (
                   (alerts.items || []).slice(0, 12).map((alert, idx) => {
                     const isEmergency = String(alert.label || "").toLowerCase().includes("drown") || String(alert.label || "").toLowerCase().includes("emerg");
-                    const color = isEmergency ? "#ff5252" : "#00d9ff";
+                    const color = isEmergency ? "#ff5252" : "#2dd4bf";
                     return (
-                      <Box key={idx} sx={{ display: "flex", alignItems: "center", gap: 2, p: 2, borderRadius: 2, bgcolor: isEmergency ? "rgba(255,82,82,0.06)" : "rgba(255,255,255,0.02)", border: `1px solid ${isEmergency ? "rgba(255,82,82,0.15)" : "rgba(255,255,255,0.04)"}`, transition: "all 0.2s", "&:hover": { bgcolor: isEmergency ? "rgba(255,82,82,0.1)" : "rgba(255,255,255,0.04)" } }}>
+                      <Box key={idx} sx={{ display: "flex", alignItems: "center", gap: 2, p: 2, borderRadius: 2, bgcolor: isEmergency ? "rgba(255,82,82,0.06)" : "rgba(45,212,191,0.04)", border: `1px solid ${isEmergency ? "rgba(255,82,82,0.15)" : "rgba(45,212,191,0.08)"}`, transition: "all 0.2s", "&:hover": { bgcolor: isEmergency ? "rgba(255,82,82,0.1)" : "rgba(45,212,191,0.08)" } }}>
                         <Box sx={{ width: 3, height: 36, borderRadius: 1, bgcolor: color, flexShrink: 0 }} />
                         <Box sx={{ flex: 1, minWidth: 0 }}>
                           <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
                             <Typography sx={{ fontSize: 12, fontWeight: 700, color: "#fff", textTransform: "capitalize" }}>{alert.label || "Detection"}</Typography>
-                            <Chip label={`Z${alert.zone}`} size="small" sx={{ height: 16, fontSize: 9, fontWeight: 700, bgcolor: "rgba(0,217,255,0.1)", color: "#00d9ff" }} />
+                            <Chip label={`Z${alert.zone}`} size="small" sx={{ height: 16, fontSize: 9, fontWeight: 700, bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf" }} />
                             {isEmergency && <Box sx={{ width: 5, height: 5, borderRadius: "50%", bgcolor: "#ff5252", animation: "pulse 0.8s infinite" }} />}
                           </Box>
                           <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -1154,7 +1740,7 @@ export default function App() {
         {tab === 2 && (
           <Box>
             <Typography sx={{ fontWeight: 800, fontSize: 20, mb: 3 }}>Event History</Typography>
-            <Box sx={{ borderRadius: 2, bgcolor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", overflow: "hidden" }}>
+            <Box sx={{ borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
               {/* Header */}
               <Box sx={{ display: "grid", gridTemplateColumns: "180px 100px 140px 1fr 80px", gap: 2, p: 2, bgcolor: "rgba(255,255,255,0.03)", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
                 <Typography sx={{ fontSize: 12, fontWeight: 700, color: "rgba(255,255,255,0.5)", textTransform: "uppercase" }}>Timestamp</Typography>
@@ -1188,8 +1774,8 @@ export default function App() {
             <Typography sx={{ fontWeight: 800, fontSize: 20, mb: 3 }}>System Settings</Typography>
 
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 3 }}>
-              <Box sx={{ p: 3, borderRadius: 2, bgcolor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
-                <Typography sx={{ fontWeight: 700, mb: 2, color: "#00bcd4" }}>Backend Configuration</Typography>
+              <Box sx={{ p: 3, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+                <Typography sx={{ fontWeight: 700, mb: 2, color: "#2dd4bf" }}>Backend Configuration</Typography>
                 <Stack spacing={1.5}>
                   {[
                     { label: "API Endpoint", value: API },
@@ -1206,8 +1792,8 @@ export default function App() {
                 </Stack>
               </Box>
 
-              <Box sx={{ p: 3, borderRadius: 2, bgcolor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)" }}>
-                <Typography sx={{ fontWeight: 700, mb: 2, color: "#ff9800" }}>Detection Settings</Typography>
+              <Box sx={{ p: 3, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+                <Typography sx={{ fontWeight: 700, mb: 2, color: "#f59e0b" }}>Detection Settings</Typography>
                 <Stack spacing={1.5}>
                   {[
                     { label: "Python Version", value: health?.python_version },
@@ -1226,8 +1812,8 @@ export default function App() {
               </Box>
 
               {/* Voice Alert Settings */}
-              <Box sx={{ p: 3, borderRadius: 2, bgcolor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", gridColumn: { md: "span 2" } }}>
-                <Typography sx={{ fontWeight: 700, mb: 2, color: "#00ff88" }}>Voice Alert Settings</Typography>
+              <Box sx={{ p: 3, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)", gridColumn: { md: "span 2" } }}>
+                <Typography sx={{ fontWeight: 700, mb: 2, color: "#34d399" }}>Voice Alert Settings</Typography>
                 <Stack spacing={2}>
                   <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", py: 1, borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
                     <Box>
@@ -1236,15 +1822,20 @@ export default function App() {
                     </Box>
                     <Button
                       variant={soundEnabled ? "contained" : "outlined"}
-                      onClick={() => setSoundEnabled(s => !s)}
+                      onClick={() => {
+                        setSoundEnabled(s => {
+                          if (s && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+                          return !s;
+                        });
+                      }}
                       startIcon={soundEnabled ? <VolumeUpIcon /> : <VolumeOffIcon />}
                       sx={{ 
-                        background: soundEnabled ? "linear-gradient(135deg, #00ff88 0%, #00cc6a 100%)" : "transparent",
-                        borderColor: "#00ff88",
-                        color: soundEnabled ? "#0a1117" : "#00ff88",
+                        background: soundEnabled ? "linear-gradient(135deg, #34d399 0%, #10b981 100%)" : "transparent",
+                        borderColor: "#34d399",
+                        color: soundEnabled ? "#071520" : "#34d399",
                         fontWeight: 700,
                         textTransform: "none",
-                        "&:hover": { background: soundEnabled ? "linear-gradient(135deg, #00cc6a 0%, #00aa55 100%)" : "rgba(0,255,136,0.15)" }
+                        "&:hover": { background: soundEnabled ? "linear-gradient(135deg, #10b981 0%, #059669 100%)" : "rgba(52,211,153,0.15)" }
                       }}
                     >
                       {soundEnabled ? "Enabled" : "Disabled"}
@@ -1274,13 +1865,16 @@ export default function App() {
                             osc.stop(ctx.currentTime + i * 0.25 + 0.2);
                           }
                         } catch (e) {}
-                        // Speak test message
+                        // Speak test message with male voice
                         if ('speechSynthesis' in window) {
                           window.speechSynthesis.cancel();
                           const utterance = new SpeechSynthesisUtterance("Alert! Drowning detected in Zone 1. Please check immediately.");
                           utterance.rate = 1.0;
                           utterance.volume = 1.0;
+                          utterance.pitch = 0.9;
                           utterance.lang = 'en-US';
+                          const maleV = getMaleVoice();
+                          if (maleV) utterance.voice = maleV;
                           setTimeout(() => window.speechSynthesis.speak(utterance), 400);
                         }
                       }}
@@ -1300,6 +1894,10 @@ export default function App() {
             </Box>
           </Box>
         )}
+
+        {tab === 4 && (
+          <VideoManager api={API} onReload={() => fetch(`${API}/api/zones/reload`, { method: "POST" }).catch(() => {})} />
+        )}
       </Box>
 
       <Dialog
@@ -1309,16 +1907,16 @@ export default function App() {
         fullWidth
         PaperProps={{
           sx: {
-            bgcolor: "#0a1117",
+            bgcolor: "#0a2e38",
             borderRadius: 4,
-            border: "1px solid rgba(0,217,255,0.2)",
+            border: "1px solid rgba(45,212,191,0.15)",
             p: 0,
             overflow: "hidden",
             width: { xs: "100vw", md: "95vw" },
             height: { xs: "100vh", md: "92vh" },
             maxWidth: "none",
             m: { xs: 0, md: 2 },
-            boxShadow: "0 25px 80px rgba(0,0,0,0.6), 0 0 100px rgba(0,217,255,0.1)",
+            boxShadow: "0 25px 80px rgba(0,0,0,0.6), 0 0 80px rgba(45,212,191,0.06)",
           },
         }}
       >
@@ -1329,19 +1927,20 @@ export default function App() {
             display: "flex", 
             alignItems: "center", 
             justifyContent: "space-between", 
-            background: "linear-gradient(180deg, rgba(0,217,255,0.08) 0%, transparent 100%)",
-            borderBottom: "1px solid rgba(0,217,255,0.15)"
+            background: "linear-gradient(180deg, rgba(45,212,191,0.06) 0%, transparent 100%)",
+            borderBottom: "1px solid rgba(45,212,191,0.1)"
           }}>
             <Box sx={{ display: "flex", alignItems: "center", gap: 3 }}>
               <Box sx={{ position: "relative" }}>
                 <Avatar sx={{ 
-                  background: "linear-gradient(135deg, #00d9ff 0%, #0096c7 100%)", 
+                  background: "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", 
                   fontWeight: 900, 
                   width: 56, 
                   height: 56,
                   fontSize: 24,
-                  boxShadow: "0 0 30px rgba(0,217,255,0.5)",
-                  border: "3px solid rgba(0,217,255,0.3)"
+                  color: "#071520",
+                  boxShadow: "0 0 30px rgba(45,212,191,0.35)",
+                  border: "3px solid rgba(45,212,191,0.3)"
                 }}>{openZone}</Avatar>
                 <Box sx={{ 
                   position: "absolute", 
@@ -1350,20 +1949,21 @@ export default function App() {
                   width: 14, 
                   height: 14, 
                   borderRadius: "50%", 
-                  bgcolor: modalPaused ? "#ffab00" : "#00ff88", 
-                  border: "2px solid #0a1117",
-                  boxShadow: `0 0 10px ${modalPaused ? "rgba(255,171,0,0.6)" : "rgba(0,255,136,0.6)"}`
+                  bgcolor: modalPaused ? "#ffab00" : "#34d399", 
+                  border: "2px solid #0a2e38",
+                  boxShadow: `0 0 10px ${modalPaused ? "rgba(255,171,0,0.6)" : "rgba(52,211,153,0.6)"}`
                 }} />
               </Box>
               <Box>
-                <Typography sx={{ fontWeight: 900, fontSize: 26, background: "linear-gradient(135deg, #fff 0%, #00d9ff 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>Zone {openZone}</Typography>
+                <Typography sx={{ fontWeight: 900, fontSize: 26, background: "linear-gradient(135deg, #fff 0%, #2dd4bf 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>Zone {openZone}</Typography>
+                {(() => { const m = zoneMeta.get(openZone); return m?.filename ? <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.35)", fontFamily: "monospace", mt: -0.5 }}>{m.filename}</Typography> : null; })()}
                 <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 0.5 }}>
                   <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                    <MyLocationIcon sx={{ fontSize: 14, color: "#00d9ff" }} />
+                    <MyLocationIcon sx={{ fontSize: 14, color: "#2dd4bf" }} />
                     <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.6)" }}>Live Monitoring</Typography>
                   </Box>
                   <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-                    <SpeedIcon sx={{ fontSize: 14, color: "#00ff88" }} />
+                    <SpeedIcon sx={{ fontSize: 14, color: "#34d399" }} />
                     <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.6)" }}>Real-time AI</Typography>
                   </Box>
                 </Stack>
@@ -1374,12 +1974,12 @@ export default function App() {
               <Chip 
                 icon={<AccessTimeIcon sx={{ fontSize: 16 }} />}
                 label={modalDetections.age_s != null ? `${modalDetections.age_s.toFixed(1)}s ago` : "Live"}
-                sx={{ bgcolor: "rgba(0,255,136,0.12)", color: "#00ff88", fontWeight: 700, fontSize: 12, border: "1px solid rgba(0,255,136,0.3)", "& .MuiChip-icon": { color: "#00ff88" } }}
+                sx={{ bgcolor: "rgba(52,211,153,0.1)", color: "#34d399", fontWeight: 700, fontSize: 12, border: "1px solid rgba(52,211,153,0.25)", "& .MuiChip-icon": { color: "#34d399" } }}
               />
               <Chip 
                 icon={<CenterFocusStrongIcon sx={{ fontSize: 16 }} />}
                 label={`${modalDetections.count ?? 0} Detected`}
-                sx={{ bgcolor: "rgba(0,217,255,0.12)", color: "#00d9ff", fontWeight: 700, fontSize: 12, border: "1px solid rgba(0,217,255,0.3)", "& .MuiChip-icon": { color: "#00d9ff" } }}
+                sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 700, fontSize: 12, border: "1px solid rgba(45,212,191,0.25)", "& .MuiChip-icon": { color: "#2dd4bf" } }}
               />
               <Box sx={{ width: 1, height: 32, bgcolor: "rgba(255,255,255,0.1)", mx: 1 }} />
               
@@ -1388,10 +1988,10 @@ export default function App() {
                 <IconButton 
                   onClick={() => setSoundEnabled(s => !s)}
                   sx={{ 
-                    color: soundEnabled ? "#00ff88" : "rgba(255,255,255,0.4)", 
-                    bgcolor: soundEnabled ? "rgba(0,255,136,0.15)" : "rgba(255,255,255,0.1)",
-                    border: `1px solid ${soundEnabled ? "rgba(0,255,136,0.3)" : "rgba(255,255,255,0.2)"}`,
-                    "&:hover": { bgcolor: soundEnabled ? "rgba(0,255,136,0.25)" : "rgba(255,255,255,0.15)" }
+                    color: soundEnabled ? "#34d399" : "rgba(255,255,255,0.4)", 
+                    bgcolor: soundEnabled ? "rgba(52,211,153,0.12)" : "rgba(255,255,255,0.1)",
+                    border: `1px solid ${soundEnabled ? "rgba(52,211,153,0.25)" : "rgba(255,255,255,0.2)"}`,
+                    "&:hover": { bgcolor: soundEnabled ? "rgba(52,211,153,0.2)" : "rgba(255,255,255,0.15)" }
                   }}
                 >
                   {soundEnabled ? <VolumeUpIcon /> : <VolumeOffIcon />}
@@ -1399,7 +1999,7 @@ export default function App() {
               </Tooltip>
               
               <Tooltip title="Zoom hint: Scroll to zoom, drag to pan">
-                <IconButton sx={{ color: "rgba(255,255,255,0.5)", "&:hover": { color: "#00d9ff" } }}>
+                <IconButton sx={{ color: "rgba(255,255,255,0.5)", "&:hover": { color: "#2dd4bf" } }}>
                   <ZoomInIcon />
                 </IconButton>
               </Tooltip>
@@ -1415,18 +2015,18 @@ export default function App() {
                   });
                 }}
                 sx={{ 
-                  background: modalPaused ? "transparent" : "linear-gradient(135deg, #00d9ff 0%, #0096c7 100%)", 
-                  borderColor: "#00d9ff", 
+                  background: modalPaused ? "transparent" : "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", 
+                  borderColor: "#2dd4bf", 
                   borderWidth: 2,
-                  color: modalPaused ? "#00d9ff" : "#0a1117", 
+                  color: modalPaused ? "#2dd4bf" : "#071520", 
                   fontWeight: 800, 
                   textTransform: "none",
                   px: 4,
                   py: 1.2,
                   fontSize: 16,
                   minWidth: 140,
-                  boxShadow: modalPaused ? "none" : "0 4px 20px rgba(0,217,255,0.4)",
-                  "&:hover": { borderWidth: 2, background: modalPaused ? "rgba(0,217,255,0.15)" : "linear-gradient(135deg, #0096c7 0%, #0077b6 100%)" }
+                  boxShadow: modalPaused ? "none" : "0 4px 20px rgba(45,212,191,0.3)",
+                  "&:hover": { borderWidth: 2, background: modalPaused ? "rgba(45,212,191,0.12)" : "linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)" }
                 }}
               >
                 {modalPaused ? "Resume" : "Pause"}
@@ -1456,7 +2056,7 @@ export default function App() {
                   minHeight: 0,
                   borderRadius: 3,
                   overflow: "hidden",
-                  background: "linear-gradient(135deg, #0d1b2a 0%, #000 100%)",
+                  background: "linear-gradient(135deg, #0a2e38 0%, #071520 100%)",
                   border: "2px solid rgba(0,217,255,0.2)",
                   touchAction: "none",
                   position: "relative",
@@ -1484,12 +2084,19 @@ export default function App() {
                           alt=""
                           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", display: modalBlobUrl ? "block" : "none" }}
                         />
+                        <video
+                          ref={modalVideoRef}
+                          muted
+                          autoPlay
+                          playsInline
+                          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "transparent", display: !modalPaused && modalMode === "hls" && modalHlsPlaying ? "block" : "none" }}
+                        />
                         <img
-                          src={openZone && modalUseMjpeg && !modalPaused ? `${API}/api/zones/${openZone}/stream.mjpg` : ""}
+                          src={openZone && modalMode === "mjpeg" && !modalPaused ? `${API}/api/zones/${openZone}/stream.mjpg` : ""}
                           alt=""
                           onLoad={() => setModalMjpegOk(true)}
-                          onError={() => { setModalUseMjpeg(false); setModalMjpegOk(false); }}
-                          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", display: openZone && modalUseMjpeg && !modalPaused ? "block" : "none" }}
+                          onError={() => { setModalMode("poll"); setModalMjpegOk(false); }}
+                          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", display: openZone && modalMode === "mjpeg" && !modalPaused ? "block" : "none" }}
                         />
                       </TransformComponent>
                       {/* Zoom controls overlay */}
@@ -1505,7 +2112,7 @@ export default function App() {
                         <Tooltip title="Zoom In" placement="left">
                           <IconButton 
                             onClick={() => zoomIn()} 
-                            sx={{ bgcolor: "rgba(0,0,0,0.7)", color: "#00d9ff", "&:hover": { bgcolor: "rgba(0,217,255,0.2)" } }}
+                            sx={{ bgcolor: "rgba(0,0,0,0.7)", color: "#2dd4bf", "&:hover": { bgcolor: "rgba(45,212,191,0.2)" } }}
                           >
                             <ZoomInIcon />
                           </IconButton>
@@ -1513,7 +2120,7 @@ export default function App() {
                         <Tooltip title="Zoom Out" placement="left">
                           <IconButton 
                             onClick={() => zoomOut()} 
-                            sx={{ bgcolor: "rgba(0,0,0,0.7)", color: "#00d9ff", "&:hover": { bgcolor: "rgba(0,217,255,0.2)" } }}
+                            sx={{ bgcolor: "rgba(0,0,0,0.7)", color: "#2dd4bf", "&:hover": { bgcolor: "rgba(45,212,191,0.2)" } }}
                           >
                             <ZoomOutIcon />
                           </IconButton>
@@ -1540,13 +2147,13 @@ export default function App() {
                   py: 0.75, 
                   borderRadius: 2, 
                   bgcolor: "rgba(0,0,0,0.7)", 
-                  border: "1px solid rgba(0,217,255,0.3)",
+                  border: "1px solid rgba(45,212,191,0.2)",
                   backdropFilter: "blur(10px)",
                   display: "flex",
                   alignItems: "center",
                   gap: 1
                 }}>
-                  <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: modalPaused ? "#ffab00" : "#00ff88", animation: modalPaused ? "none" : "pulse 2s infinite" }} />
+                  <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: modalPaused ? "#ffab00" : "#34d399", animation: modalPaused ? "none" : "pulse 2s infinite" }} />
                   <Typography sx={{ fontSize: 12, fontWeight: 700, color: "#fff" }}>
                     {modalPaused ? "PAUSED" : "LIVE"}
                   </Typography>
@@ -1562,7 +2169,7 @@ export default function App() {
                   py: 1.5, 
                   borderRadius: 3, 
                   bgcolor: "rgba(0,0,0,0.85)", 
-                  border: "1px solid rgba(0,217,255,0.3)",
+                  border: "1px solid rgba(45,212,191,0.2)",
                   backdropFilter: "blur(15px)",
                   display: "flex",
                   alignItems: "center",
@@ -1582,14 +2189,14 @@ export default function App() {
                     sx={{ 
                       width: 56, 
                       height: 56, 
-                      bgcolor: modalPaused ? "rgba(0,217,255,0.2)" : "linear-gradient(135deg, #00d9ff 0%, #0096c7 100%)",
-                      background: modalPaused ? "rgba(0,217,255,0.2)" : "linear-gradient(135deg, #00d9ff 0%, #0096c7 100%)",
-                      color: modalPaused ? "#00d9ff" : "#0a1117",
-                      border: "2px solid rgba(0,217,255,0.5)",
-                      boxShadow: modalPaused ? "none" : "0 0 30px rgba(0,217,255,0.5)",
+                      bgcolor: modalPaused ? "rgba(45,212,191,0.2)" : "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)",
+                      background: modalPaused ? "rgba(45,212,191,0.2)" : "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)",
+                      color: modalPaused ? "#2dd4bf" : "#071520",
+                      border: "2px solid rgba(45,212,191,0.4)",
+                      boxShadow: modalPaused ? "none" : "0 0 30px rgba(45,212,191,0.35)",
                       "&:hover": { 
-                        bgcolor: modalPaused ? "rgba(0,217,255,0.35)" : "#0096c7",
-                        background: modalPaused ? "rgba(0,217,255,0.35)" : "#0096c7",
+                        bgcolor: modalPaused ? "rgba(45,212,191,0.35)" : "#14b8a6",
+                        background: modalPaused ? "rgba(45,212,191,0.35)" : "#14b8a6",
                       }
                     }}
                   >
@@ -1600,7 +2207,7 @@ export default function App() {
                   
                   {/* Detection count */}
                   <Box sx={{ textAlign: "center", minWidth: 80 }}>
-                    <Typography sx={{ fontSize: 24, fontWeight: 900, color: "#00d9ff", lineHeight: 1 }}>{modalDetections.count ?? 0}</Typography>
+                    <Typography sx={{ fontSize: 24, fontWeight: 900, color: "#2dd4bf", lineHeight: 1 }}>{modalDetections.count ?? 0}</Typography>
                     <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: 1 }}>Detected</Typography>
                   </Box>
                   
@@ -1611,8 +2218,8 @@ export default function App() {
                     <IconButton 
                       onClick={() => setSoundEnabled(s => !s)}
                       sx={{ 
-                        color: soundEnabled ? "#00ff88" : "rgba(255,255,255,0.4)", 
-                        "&:hover": { color: soundEnabled ? "#00ff88" : "#fff" }
+                        color: soundEnabled ? "#34d399" : "rgba(255,255,255,0.4)", 
+                        "&:hover": { color: soundEnabled ? "#34d399" : "#fff" }
                       }}
                     >
                       {soundEnabled ? <VolumeUpIcon sx={{ fontSize: 28 }} /> : <VolumeOffIcon sx={{ fontSize: 28 }} />}
@@ -1649,25 +2256,25 @@ export default function App() {
             </Box>
 
             {/* Enhanced Sidebar */}
-            <Box sx={{ minHeight: 0, display: "flex", flexDirection: "column", gap: 2, overflow: "hidden", display: { xs: "none", lg: "flex" } }}>
+            <Box sx={{ minHeight: 0, display: { xs: "none", lg: "flex" }, flexDirection: "column", gap: 2, overflow: "hidden" }}>
               {/* Live Stats Card */}
               <Box sx={{ 
                 p: 2.5, 
                 borderRadius: 3, 
-                background: "linear-gradient(135deg, rgba(0,217,255,0.15) 0%, rgba(0,150,199,0.08) 100%)",
-                border: "1px solid rgba(0,217,255,0.25)",
+                background: "linear-gradient(135deg, rgba(45,212,191,0.12) 0%, rgba(20,184,166,0.06) 100%)",
+                border: "1px solid rgba(45,212,191,0.2)",
                 position: "relative",
                 overflow: "hidden"
               }}>
-                <Box sx={{ position: "absolute", top: -30, right: -30, width: 100, height: 100, borderRadius: "50%", bgcolor: "rgba(0,217,255,0.1)" }} />
+                <Box sx={{ position: "absolute", top: -30, right: -30, width: 100, height: 100, borderRadius: "50%", bgcolor: "rgba(45,212,191,0.08)" }} />
                 <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.5)", fontWeight: 800, textTransform: "uppercase", letterSpacing: 1.5, mb: 1 }}>Live Detection</Typography>
                 <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-                  <Typography sx={{ fontSize: 48, fontWeight: 900, color: "#00d9ff", lineHeight: 1 }}>{modalDetections.count ?? 0}</Typography>
+                  <Typography sx={{ fontSize: 48, fontWeight: 900, color: "#2dd4bf", lineHeight: 1 }}>{modalDetections.count ?? 0}</Typography>
                   <Typography sx={{ fontSize: 16, color: "rgba(255,255,255,0.5)", fontWeight: 600 }}>objects</Typography>
                 </Box>
                 <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 1.5 }}>
-                  <TrendingUpIcon sx={{ fontSize: 16, color: "#00ff88" }} />
-                  <Typography sx={{ fontSize: 12, color: "#00ff88", fontWeight: 600 }}>Active monitoring</Typography>
+                  <TrendingUpIcon sx={{ fontSize: 16, color: "#34d399" }} />
+                  <Typography sx={{ fontSize: 12, color: "#34d399", fontWeight: 600 }}>Active monitoring</Typography>
                 </Box>
               </Box>
               
@@ -1682,8 +2289,8 @@ export default function App() {
                 <Stack spacing={1.5}>
                   {[
                     { label: "Total Alerts", value: modalAnalysis.alerts_total ?? 0, color: "#ffab00" },
-                    { label: "Detection Objects", value: Object.keys(modalAnalysis.alerts_by_label || {}).length, color: "#00d9ff" },
-                    { label: "Stream Status", value: modalMjpegOk ? "Active" : "Polling", color: "#00ff88" },
+                    { label: "Detection Objects", value: Object.keys(modalAnalysis.alerts_by_label || {}).length, color: "#2dd4bf" },
+                    { label: "Stream Status", value: modalMjpegOk ? "Active" : "Polling", color: "#34d399" },
                   ].map(stat => (
                     <Box key={stat.label} sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", py: 1, borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
                       <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>{stat.label}</Typography>
@@ -1709,7 +2316,7 @@ export default function App() {
                   <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.5)", fontWeight: 800, textTransform: "uppercase", letterSpacing: 1.5 }}>Recent Events</Typography>
                   <Chip label={`${(modalAlerts.items || []).length}`} size="small" sx={{ bgcolor: "rgba(255,255,255,0.1)", height: 20, fontSize: 11, fontWeight: 700 }} />
                 </Box>
-                <Box sx={{ flex: 1, overflow: "auto", pr: 1, "&::-webkit-scrollbar": { width: 4 }, "&::-webkit-scrollbar-track": { bgcolor: "rgba(255,255,255,0.05)", borderRadius: 2 }, "&::-webkit-scrollbar-thumb": { bgcolor: "rgba(0,217,255,0.3)", borderRadius: 2 } }}>
+                <Box sx={{ flex: 1, overflow: "auto", pr: 1, "&::-webkit-scrollbar": { width: 4 }, "&::-webkit-scrollbar-track": { bgcolor: "rgba(255,255,255,0.05)", borderRadius: 2 }, "&::-webkit-scrollbar-thumb": { bgcolor: "rgba(45,212,191,0.25)", borderRadius: 2 } }}>
                   <Stack spacing={1}>
                     {(modalAlerts.items || []).slice(0, 15).map((a, idx) => {
                       const isEmergency = String(a.label || "").toLowerCase().includes("drown") || String(a.label || "").toLowerCase().includes("emerg");
@@ -1734,8 +2341,8 @@ export default function App() {
                               label={`${((a.conf ?? 0) * 100).toFixed(0)}%`} 
                               size="small" 
                               sx={{ 
-                                bgcolor: isEmergency ? "rgba(255,82,82,0.2)" : "rgba(0,217,255,0.15)", 
-                                color: isEmergency ? "#ff5252" : "#00d9ff", 
+                                bgcolor: isEmergency ? "rgba(255,82,82,0.2)" : "rgba(45,212,191,0.12)", 
+                                color: isEmergency ? "#ff5252" : "#2dd4bf", 
                                 fontWeight: 800, 
                                 fontSize: 10, 
                                 height: 18,

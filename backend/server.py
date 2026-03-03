@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import csv
+import glob
 import os
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import sys
 import platform
 from collections import Counter, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -105,14 +109,71 @@ VIDEO_DIR_CANDIDATES = [
 
 import re
 
+# Supported video file extensions
+_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".flv", ".wmv", ".m4v", ".ts"}
+
+# Stable mapping: filename -> zone ID (persists across rescans so IDs don't shuffle)
+_video_name_to_zid: Dict[str, int] = {}
+_next_auto_zid: int = 1
+
+
 def _find_zone_ids(video_dir: Path) -> list:
-    """Return sorted list of all zone IDs (ints) for zone*.mp4 in the video dir."""
-    ids = set()
-    for p in video_dir.glob("zone*.mp4"):
-        m = re.match(r"zone(\d+)\.mp4", p.name, re.IGNORECASE)
+    """Return sorted list of all zone IDs for ALL video files in the video dir.
+    
+    - zone{N}.mp4 files get zone ID = N  (backward compatible)
+    - Any other video file gets a stable auto-assigned ID
+    """
+    global _next_auto_zid
+
+    # Discover all video files
+    all_videos: Dict[str, Path] = {}
+    if video_dir.exists():
+        for p in video_dir.iterdir():
+            if p.is_file() and p.suffix.lower() in _VIDEO_EXTENSIONS:
+                all_videos[p.name] = p
+
+    # First pass: assign IDs for zone{N}.* files (backward compat)
+    assigned: Dict[str, int] = {}
+    used_ids: set = set()
+    for name in sorted(all_videos.keys()):
+        m = re.match(r"zone(\d+)\.\w+$", name, re.IGNORECASE)
         if m:
-            ids.add(int(m.group(1)))
-    return sorted(ids)
+            zid = int(m.group(1))
+            assigned[name] = zid
+            used_ids.add(zid)
+
+    # Second pass: assign stable IDs for other video files
+    for name in sorted(all_videos.keys()):
+        if name in assigned:
+            continue
+        # Check if we already assigned an ID in a previous scan
+        if name in _video_name_to_zid:
+            zid = _video_name_to_zid[name]
+            assigned[name] = zid
+            used_ids.add(zid)
+        else:
+            # Find next available ID
+            while _next_auto_zid in used_ids:
+                _next_auto_zid += 1
+            assigned[name] = _next_auto_zid
+            used_ids.add(_next_auto_zid)
+            _next_auto_zid += 1
+
+    # Update stable mapping
+    _video_name_to_zid.clear()
+    _video_name_to_zid.update({name: zid for name, zid in assigned.items()})
+
+    # Update _next_auto_zid to be beyond all used IDs
+    if used_ids:
+        _next_auto_zid = max(max(used_ids) + 1, _next_auto_zid)
+
+    return sorted(assigned.values())
+
+
+# Also maintain a reverse map: zid -> filename for display
+def _zid_to_filename() -> Dict[int, str]:
+    return {zid: name for name, zid in _video_name_to_zid.items()}
+
 
 ZONE_IDS = _find_zone_ids(
     Path(_VIDEO_DIR_ENV) if _VIDEO_DIR_ENV else (ROOT / ".." / "frontend" / "dashboard" / "videos")
@@ -141,6 +202,13 @@ COASTVISION_ALERT_COOLDOWN_S = float(os.environ.get("COASTVISION_ALERT_COOLDOWN_
 COASTVISION_DET_HOLD_S = float(os.environ.get("COASTVISION_DET_HOLD_S", "1.5"))  # Hold detections longer (1.5s) to prevent flickering
 COASTVISION_OVERLAY_STYLE = os.environ.get("COASTVISION_OVERLAY_STYLE", "pro").strip().lower()
 
+# HLS Streaming (hardware-accelerated via FFmpeg + NVENC)
+COASTVISION_HLS_ENABLED = os.environ.get("COASTVISION_HLS_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+COASTVISION_HLS_SEGMENT_S = float(os.environ.get("COASTVISION_HLS_SEGMENT_S", "1"))  # short segments for low latency
+COASTVISION_HLS_LIST_SIZE = int(os.environ.get("COASTVISION_HLS_LIST_SIZE", "4"))  # sliding window of segments in playlist
+COASTVISION_HLS_BITRATE = os.environ.get("COASTVISION_HLS_BITRATE", "2M").strip()  # target bitrate
+COASTVISION_HLS_PRESET = os.environ.get("COASTVISION_HLS_PRESET", "p4").strip()  # NVENC preset (p1-p7, p4=balanced)
+
 COASTVISION_ENABLE_PERSON_DET = os.environ.get("COASTVISION_ENABLE_PERSON_DET", "1").strip().lower() not in {
     "0",
     "false",
@@ -156,6 +224,63 @@ ALERTS_DIR = (ROOT / ".." / "data" / "alerts").resolve()
 ALERTS_IMAGES_DIR = (ALERTS_DIR / "images").resolve()
 ALERTS_CSV_PATH = (ALERTS_DIR / "alerts.csv").resolve()
 _alerts_lock = threading.Lock()
+
+# ----------------- LIFEGUARD MANAGEMENT -----------------
+import json
+import uuid
+import queue
+
+# In-memory lifeguard registry (for demo; use DB in production)
+LIFEGUARDS: Dict[str, Dict[str, Any]] = {}  # id -> {id, name, phone, zones: [], online: bool, last_seen}
+LIFEGUARD_SESSIONS: Dict[str, str] = {}  # session_token -> lifeguard_id
+LIFEGUARD_ALERTS: Dict[str, deque] = {}  # lifeguard_id -> deque of alerts
+LIFEGUARD_SSE_QUEUES: Dict[str, queue.Queue] = {}  # lifeguard_id -> SSE queue for real-time push
+_lifeguard_lock = threading.Lock()
+
+# File to persist lifeguards
+LIFEGUARDS_FILE = (ALERTS_DIR / "lifeguards.json").resolve()
+
+def _load_lifeguards():
+    """Load lifeguards from file on startup."""
+    global LIFEGUARDS
+    if LIFEGUARDS_FILE.exists():
+        try:
+            with open(LIFEGUARDS_FILE, "r") as f:
+                LIFEGUARDS = json.load(f)
+            print(f"[lifeguard] Loaded {len(LIFEGUARDS)} lifeguards from {LIFEGUARDS_FILE}")
+        except Exception as e:
+            print(f"[lifeguard] Error loading lifeguards: {e}")
+            LIFEGUARDS = {}
+
+def _save_lifeguards():
+    """Persist lifeguards to file."""
+    try:
+        LIFEGUARDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LIFEGUARDS_FILE, "w") as f:
+            json.dump(LIFEGUARDS, f, indent=2)
+    except Exception as e:
+        print(f"[lifeguard] Error saving lifeguards: {e}")
+
+_load_lifeguards()
+
+def _broadcast_alert_to_lifeguards(alert: dict):
+    """Send alert to all lifeguards assigned to the zone."""
+    zone = alert.get("zone")
+    with _lifeguard_lock:
+        for lg_id, lg in LIFEGUARDS.items():
+            # Send to lifeguards assigned to this zone OR all zones (empty list = all)
+            assigned = lg.get("zones", [])
+            if not assigned or zone in assigned:
+                # Add to their alert queue
+                if lg_id not in LIFEGUARD_ALERTS:
+                    LIFEGUARD_ALERTS[lg_id] = deque(maxlen=100)
+                LIFEGUARD_ALERTS[lg_id].appendleft(alert)
+                # Push to SSE if connected
+                if lg_id in LIFEGUARD_SSE_QUEUES:
+                    try:
+                        LIFEGUARD_SSE_QUEUES[lg_id].put_nowait(alert)
+                    except:
+                        pass
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -442,6 +567,230 @@ class ZoneState:
     last_alert_time_s: float = 0.0
     last_dets: Optional[List[Dict[str, Any]]] = None
     last_dets_ts: float = 0.0
+    # HLS streaming state
+    hls_proc: Optional[Any] = None  # FFmpeg subprocess
+    hls_dir: Optional[Path] = None  # Temp dir for .ts segments + .m3u8
+    hls_frame_w: int = 0
+    hls_frame_h: int = 0
+    hls_ok: bool = False
+
+
+# ----- HLS Infrastructure -----
+
+_HLS_BASE_DIR: Optional[Path] = None
+_FFMPEG_PATH: Optional[str] = None
+_HLS_USE_NVENC: bool = False
+
+
+def _find_ffmpeg() -> Optional[str]:
+    """Locate FFmpeg binary."""
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    # Common Windows install locations
+    for candidate in [
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        os.path.expanduser(r"~\scoop\apps\ffmpeg\current\bin\ffmpeg.exe"),
+        os.path.expanduser(r"~\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"),
+        os.path.expanduser(r"~\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffmpeg.exe"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _check_nvenc(ffmpeg: str) -> bool:
+    """Test if FFmpeg can actually use h264_nvenc (not just listed — needs driver support)."""
+    try:
+        # Actually try to initialize the encoder — checking -encoders is not enough
+        # because the binary may list nvenc even if the driver is too old.
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
+             "-c:v", "h264_nvenc", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _init_hls():
+    """Initialize HLS temp directory and probe FFmpeg capabilities."""
+    global _HLS_BASE_DIR, _FFMPEG_PATH, _HLS_USE_NVENC
+
+    _FFMPEG_PATH = _find_ffmpeg()
+    if not _FFMPEG_PATH:
+        print("[HLS] FFmpeg not found — HLS streaming disabled")
+        return
+
+    _HLS_USE_NVENC = _check_nvenc(_FFMPEG_PATH)
+    print(f"[HLS] FFmpeg: {_FFMPEG_PATH}")
+    print(f"[HLS] NVENC available: {_HLS_USE_NVENC}")
+
+    _HLS_BASE_DIR = Path(tempfile.mkdtemp(prefix="coastvision_hls_"))
+    print(f"[HLS] Segment directory: {_HLS_BASE_DIR}")
+
+
+def _start_hls_encoder(st: ZoneState, width: int, height: int, fps: int):
+    """Launch FFmpeg process to encode raw BGR frames into HLS segments."""
+    if not _FFMPEG_PATH or not _HLS_BASE_DIR or not COASTVISION_HLS_ENABLED:
+        return
+
+    # Rate-limit restarts: don't restart within 3 seconds of last attempt
+    now = time.time()
+    last_attempt = getattr(st, '_hls_last_start', 0.0)
+    if now - last_attempt < 3.0:
+        return
+    st._hls_last_start = now
+
+    # Track consecutive failures to fall back from NVENC to libx264
+    fail_count = getattr(st, '_hls_nvenc_fails', 0)
+
+    # Create zone-specific dir
+    zdir = _HLS_BASE_DIR / f"zone{st.zid}"
+    zdir.mkdir(parents=True, exist_ok=True)
+    st.hls_dir = zdir
+    st.hls_frame_w = width
+    st.hls_frame_h = height
+
+    playlist = str(zdir / "stream.m3u8")
+    segment_pattern = str(zdir / "seg%05d.ts")
+
+    # Determine encoder: use NVENC unless we've had repeated failures (session limit)
+    use_nvenc = _HLS_USE_NVENC and fail_count < 2
+
+    # Build encoder args
+    if use_nvenc:
+        enc_args = [
+            "-c:v", "h264_nvenc",
+            "-preset", COASTVISION_HLS_PRESET,
+            "-tune", "ll",
+            "-rc", "cbr",
+            "-b:v", COASTVISION_HLS_BITRATE,
+            "-maxrate", COASTVISION_HLS_BITRATE,
+            "-bufsize", "1M",
+            "-profile:v", "main",
+            "-g", str(fps),
+            "-sc_threshold", "0",
+        ]
+    else:
+        enc_args = [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-b:v", COASTVISION_HLS_BITRATE,
+            "-maxrate", COASTVISION_HLS_BITRATE,
+            "-bufsize", "1M",
+            "-profile:v", "main",
+            "-g", str(fps),
+            "-sc_threshold", "0",
+        ]
+
+    cmd = [
+        _FFMPEG_PATH,
+        "-hide_banner", "-loglevel", "error",
+        # Input: raw BGR frames from stdin pipe
+        "-f", "rawvideo",
+        "-pixel_format", "bgr24",
+        "-video_size", f"{width}x{height}",
+        "-framerate", str(fps),
+        "-i", "pipe:0",
+        # Convert to yuv420p (required for H.264 main/high profile)
+        "-pix_fmt", "yuv420p",
+        # Encoder
+        *enc_args,
+        # HLS output
+        "-f", "hls",
+        "-hls_time", str(COASTVISION_HLS_SEGMENT_S),
+        "-hls_list_size", str(COASTVISION_HLS_LIST_SIZE),
+        "-hls_flags", "delete_segments+append_list+independent_segments",
+        "-hls_segment_type", "mpegts",
+        "-hls_segment_filename", segment_pattern,
+        "-y",
+        playlist,
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            bufsize=width * height * 3 * 2,
+        )
+        st.hls_proc = proc
+        st.hls_ok = True
+        encoder_name = 'NVENC' if use_nvenc else 'libx264'
+        print(f"[HLS] Started encoder for zone {st.zid} ({width}x{height} @ {fps}fps, {encoder_name})")
+    except Exception as e:
+        print(f"[HLS] Failed to start encoder for zone {st.zid}: {e}")
+        st.hls_ok = False
+
+
+def _feed_hls_frame(st: ZoneState, frame):
+    """Write a raw BGR frame to the FFmpeg stdin pipe."""
+    if not st.hls_proc or not st.hls_ok:
+        return
+    try:
+        h, w = frame.shape[:2]
+        # If frame dimensions changed, restart encoder
+        if w != st.hls_frame_w or h != st.hls_frame_h:
+            _stop_hls_encoder(st)
+            _start_hls_encoder(st, w, h, COASTVISION_FPS)
+        if st.hls_proc and st.hls_proc.stdin:
+            st.hls_proc.stdin.write(frame.tobytes())
+    except (BrokenPipeError, OSError):
+        # Read FFmpeg stderr for diagnostics
+        stderr_text = ""
+        try:
+            if st.hls_proc and st.hls_proc.stderr:
+                stderr_text = st.hls_proc.stderr.read(4096).decode("utf-8", errors="replace").strip()
+        except Exception:
+            pass
+        fail_count = getattr(st, '_hls_nvenc_fails', 0) + 1
+        st._hls_nvenc_fails = fail_count
+        st.hls_ok = False
+        msg = f"[HLS] Encoder pipe broken for zone {st.zid} (fail #{fail_count})"
+        if stderr_text:
+            msg += f" — FFmpeg: {stderr_text[:200]}"
+        print(msg)
+    except Exception as e:
+        st.hls_ok = False
+        print(f"[HLS] Feed error zone {st.zid}: {e}")
+
+
+def _stop_hls_encoder(st: ZoneState):
+    """Gracefully stop FFmpeg process for a zone."""
+    proc = st.hls_proc
+    st.hls_proc = None
+    st.hls_ok = False
+    if proc:
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def _cleanup_hls():
+    """Stop all encoders and remove temp dir on shutdown."""
+    for st in _zones.values():
+        _stop_hls_encoder(st)
+    if _HLS_BASE_DIR and _HLS_BASE_DIR.exists():
+        try:
+            shutil.rmtree(_HLS_BASE_DIR, ignore_errors=True)
+        except Exception:
+            pass
+
+import atexit
+atexit.register(_cleanup_hls)
 
 
 VIDEO_PATHS: Dict[int, Path] = {}
@@ -454,8 +803,10 @@ def _open_zone_caps():
     VIDEO_DIR.mkdir(parents=True, exist_ok=True)
     global ZONE_IDS
     ZONE_IDS = _find_zone_ids(VIDEO_DIR)
+    name_map = _zid_to_filename()
     for zid in ZONE_IDS:
-        p = VIDEO_DIR / f"zone{zid}.mp4"
+        filename = name_map.get(zid, f"zone{zid}.mp4")
+        p = VIDEO_DIR / filename
         VIDEO_PATHS[zid] = p
         if not p.exists():
             print(f"[warn] Missing video for zone {zid}: {p}")
@@ -485,6 +836,8 @@ def _ensure_zone_thread(zid: int):
 def _record_alerts(alerts):
     for a in alerts:
         ALERT_HISTORY.appendleft(a)
+        # Broadcast to lifeguards in real-time
+        _broadcast_alert_to_lifeguards(a)
 
 
 def _persist_alerts(zid: int, alerts, annotated_bgr_frame):
@@ -655,6 +1008,13 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
                             elif hold_time <= COASTVISION_DET_HOLD_S * 2:
                                 _draw_detections(frame, st.last_dets)
 
+                    # --- HLS: feed annotated frame to FFmpeg encoder ---
+                    if COASTVISION_HLS_ENABLED and _FFMPEG_PATH:
+                        if not st.hls_ok:
+                            h, w = frame.shape[:2]
+                            _start_hls_encoder(st, w, h, fps)
+                        _feed_hls_frame(st, frame)
+
                     # Higher JPEG quality (88) for crisp detection boxes and smooth video
                     ok2, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
                     if ok2:
@@ -691,12 +1051,26 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
         dt = time.time() - t0
         time.sleep(max(0.0, interval - dt))
 
+    # Clean up HLS encoder when worker exits
+    _stop_hls_encoder(st)
     _zone_threads.pop(zid, None)
 
 
 # ----------------- API (Flask) -----------------
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024 * 1024  # 10 GB max upload
 CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+
+@app.errorhandler(413)
+def _too_large(e):
+    return jsonify({"error": "File too large. Max upload size is 10 GB."}), 413
+
+
+@app.errorhandler(500)
+def _internal(e):
+    return jsonify({"error": f"Internal server error: {e}"}), 500
+
 
 _workers_started = False
 _workers_lock = threading.Lock()
@@ -709,6 +1083,9 @@ def _start_workers_once():
     with _workers_lock:
         if _workers_started:
             return
+        # Initialize HLS infrastructure
+        if COASTVISION_HLS_ENABLED:
+            _init_hls()
         _open_zone_caps()
         for zid in list(_zones.keys()):
             _ensure_zone_thread(zid)
@@ -764,6 +1141,8 @@ def health():
             "max_side": COASTVISION_MAX_SIDE,
             "fps": COASTVISION_FPS,
             "infer_every": COASTVISION_INFER_EVERY,
+            "hls_enabled": COASTVISION_HLS_ENABLED and _FFMPEG_PATH is not None,
+            "hls_nvenc": _HLS_USE_NVENC,
         }
     )
 
@@ -771,12 +1150,14 @@ def health():
 @app.route("/api/zones", methods=["GET"])
 
 def zones():
-    # Always rescan for new zone*.mp4 files before reporting zones
+    # Always rescan for ALL video files before reporting zones
     global ZONE_IDS
     ZONE_IDS = _find_zone_ids(VIDEO_DIR)
+    name_map = _zid_to_filename()
     for zid in ZONE_IDS:
         if zid not in VIDEO_PATHS:
-            p = VIDEO_DIR / f"zone{zid}.mp4"
+            filename = name_map.get(zid, f"zone{zid}.mp4")
+            p = VIDEO_DIR / filename
             VIDEO_PATHS[zid] = p
             if p.exists():
                 cap = _open_capture(p)
@@ -788,19 +1169,23 @@ def zones():
         if zid not in ZONE_IDS:
             VIDEO_PATHS.pop(zid, None)
             zs = _zones.pop(zid, None)
-            if zs and zs.cap:
-                try:
-                    zs.cap.release()
-                except Exception:
-                    pass
+            if zs:
+                _stop_hls_encoder(zs)
+                if zs.cap:
+                    try:
+                        zs.cap.release()
+                    except Exception:
+                        pass
             _zone_threads.pop(zid, None)
     items = []
     now = time.time()
-    for zid, p in VIDEO_PATHS.items():
+    zid_names = _zid_to_filename()
+    for zid, p in sorted(VIDEO_PATHS.items()):
         st = _zones.get(zid)
         items.append(
             {
                 "id": zid,
+                "filename": zid_names.get(zid, p.name),
                 "path": str(p),
                 "exists": bool(p.exists()),
                 "active": zid in _zones,
@@ -809,7 +1194,7 @@ def zones():
                 "last_error": st.last_error if st else None,
             }
         )
-    return jsonify({"items": items})
+    return jsonify({"items": items, "video_dir": str(VIDEO_DIR)})
 
 # Optional: endpoint to force reload all videos (for UI button)
 @app.route("/api/zones/reload", methods=["POST"])
@@ -818,6 +1203,158 @@ def reload_zones():
     for zid in list(_zones.keys()):
         _ensure_zone_thread(zid)
     return jsonify({"ok": True, "zones": [z for z in ZONE_IDS]})
+
+
+# --------- VIDEO MANAGEMENT API ---------
+
+@app.route("/api/videos", methods=["GET"])
+def list_videos():
+    """List all video files in VIDEO_DIR with their zone assignment."""
+    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    name_map = _zid_to_filename()
+    zid_for_name = {v: k for k, v in name_map.items()}
+    files = []
+    for p in sorted(VIDEO_DIR.iterdir()):
+        if p.is_file() and p.suffix.lower() in _VIDEO_EXTENSIONS:
+            zid = zid_for_name.get(p.name)
+            size_mb = round(p.stat().st_size / (1024 * 1024), 2)
+            files.append({
+                "filename": p.name,
+                "size_mb": size_mb,
+                "zone_id": zid,
+                "active": zid in _zones if zid else False,
+            })
+    return jsonify({"items": files, "video_dir": str(VIDEO_DIR), "supported_extensions": list(_VIDEO_EXTENSIONS)})
+
+
+@app.route("/api/videos/upload", methods=["POST"])
+def upload_video():
+    """Upload one or more video files. Auto-assigns zone IDs on next scan."""
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "No file provided. Use form field 'file'."}), 400
+
+        VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+        uploaded = []
+        files = request.files.getlist("file")
+        for f in files:
+            if not f.filename:
+                continue
+            # Sanitize filename
+            safe_name = Path(f.filename).name
+            # Check extension
+            ext = Path(safe_name).suffix.lower()
+            if ext not in _VIDEO_EXTENSIONS:
+                uploaded.append({"filename": safe_name, "ok": False, "error": f"Unsupported extension '{ext}'"})
+                continue
+            dest = VIDEO_DIR / safe_name
+            # If file exists, add a suffix
+            if dest.exists():
+                stem = dest.stem
+                i = 1
+                while dest.exists():
+                    dest = VIDEO_DIR / f"{stem}_{i}{ext}"
+                    i += 1
+            f.save(str(dest))
+            uploaded.append({"filename": dest.name, "ok": True, "size_mb": round(dest.stat().st_size / (1024 * 1024), 2)})
+
+        # Auto-reload zones to pick up new files
+        _open_zone_caps()
+        for zid in list(_zones.keys()):
+            _ensure_zone_thread(zid)
+
+        return jsonify({"uploaded": uploaded, "zones": [z for z in ZONE_IDS]})
+    except Exception as e:
+        print(f"[upload] Error: {type(e).__name__}: {e}")
+        return jsonify({"error": f"Upload failed: {type(e).__name__}: {e}"}), 500
+
+
+@app.route("/api/videos/<filename>", methods=["DELETE"])
+def delete_video(filename: str):
+    """Delete a video file and stop its zone."""
+    safe_name = Path(filename).name
+    p = VIDEO_DIR / safe_name
+    if not p.exists():
+        return jsonify({"error": f"File '{safe_name}' not found"}), 404
+
+    # Find and stop corresponding zone
+    name_map = _zid_to_filename()
+    zid_for_name = {v: k for k, v in name_map.items()}
+    zid = zid_for_name.get(safe_name)
+    if zid:
+        zs = _zones.pop(zid, None)
+        if zs:
+            _stop_hls_encoder(zs)
+            if zs.cap:
+                try:
+                    zs.cap.release()
+                except Exception:
+                    pass
+        VIDEO_PATHS.pop(zid, None)
+        _zone_threads.pop(zid, None)
+        _video_name_to_zid.pop(safe_name, None)
+
+    try:
+        p.unlink()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    global ZONE_IDS
+    ZONE_IDS = _find_zone_ids(VIDEO_DIR)
+    return jsonify({"ok": True, "deleted": safe_name, "zones": [z for z in ZONE_IDS]})
+
+
+@app.route("/api/videos/<filename>/rename", methods=["POST"])
+def rename_video(filename: str):
+    """Rename a video file."""
+    data = request.get_json() or {}
+    new_name = data.get("new_name", "").strip()
+    if not new_name:
+        return jsonify({"error": "new_name is required"}), 400
+
+    safe_old = Path(filename).name
+    safe_new = Path(new_name).name
+
+    ext = Path(safe_new).suffix.lower()
+    if ext not in _VIDEO_EXTENSIONS:
+        return jsonify({"error": f"Unsupported extension '{ext}'"}), 400
+
+    old_path = VIDEO_DIR / safe_old
+    new_path = VIDEO_DIR / safe_new
+
+    if not old_path.exists():
+        return jsonify({"error": f"File '{safe_old}' not found"}), 404
+    if new_path.exists() and safe_old != safe_new:
+        return jsonify({"error": f"File '{safe_new}' already exists"}), 409
+
+    # Stop old zone
+    name_map = _zid_to_filename()
+    zid_for_name = {v: k for k, v in name_map.items()}
+    zid = zid_for_name.get(safe_old)
+    if zid:
+        zs = _zones.pop(zid, None)
+        if zs:
+            _stop_hls_encoder(zs)
+            if zs.cap:
+                try:
+                    zs.cap.release()
+                except Exception:
+                    pass
+        VIDEO_PATHS.pop(zid, None)
+        _zone_threads.pop(zid, None)
+        _video_name_to_zid.pop(safe_old, None)
+
+    try:
+        old_path.rename(new_path)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    # Re-scan and restart
+    _open_zone_caps()
+    for z in list(_zones.keys()):
+        _ensure_zone_thread(z)
+
+    return jsonify({"ok": True, "old_name": safe_old, "new_name": safe_new, "zones": [z for z in ZONE_IDS]})
 
 
 @app.route("/api/zones/<int:zid>/frame.jpg", methods=["GET"])
@@ -871,6 +1408,77 @@ def zone_stream(zid: int):
     )
 
 
+# ----- HLS Streaming Endpoints -----
+
+@app.route("/api/zones/<int:zid>/hls/stream.m3u8", methods=["GET"])
+def zone_hls_playlist(zid: int):
+    """Serve the HLS playlist (.m3u8) for a zone."""
+    st = _zones.get(zid)
+    if not st or not st.hls_dir:
+        abort(404)
+    p = st.hls_dir / "stream.m3u8"
+    if not p.exists():
+        abort(404)
+    data = p.read_bytes()
+    return Response(
+        data,
+        mimetype="application/vnd.apple.mpegurl",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.route("/api/zones/<int:zid>/hls/<path:filename>", methods=["GET"])
+def zone_hls_segment(zid: int, filename: str):
+    """Serve HLS .ts segments for a zone."""
+    st = _zones.get(zid)
+    if not st or not st.hls_dir:
+        abort(404)
+    # Security: only allow .ts files, no path traversal
+    safe_name = Path(filename).name
+    if not safe_name.endswith(".ts"):
+        abort(400)
+    p = st.hls_dir / safe_name
+    if not p.exists():
+        abort(404)
+    data = p.read_bytes()
+    return Response(
+        data,
+        mimetype="video/mp2t",
+        headers={
+            "Cache-Control": "no-cache",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.route("/api/hls/status", methods=["GET"])
+def hls_status():
+    """Return HLS streaming status for all zones."""
+    zones_status = {}
+    for zid, st in _zones.items():
+        playlist_exists = False
+        segment_count = 0
+        if st.hls_dir and st.hls_dir.exists():
+            playlist_exists = (st.hls_dir / "stream.m3u8").exists()
+            segment_count = len(list(st.hls_dir.glob("*.ts")))
+        zones_status[str(zid)] = {
+            "hls_ok": st.hls_ok,
+            "encoder_running": st.hls_proc is not None and st.hls_proc.poll() is None,
+            "playlist_ready": playlist_exists,
+            "segments": segment_count,
+            "resolution": f"{st.hls_frame_w}x{st.hls_frame_h}" if st.hls_frame_w else None,
+        }
+    return jsonify({
+        "hls_enabled": COASTVISION_HLS_ENABLED and _FFMPEG_PATH is not None,
+        "nvenc": _HLS_USE_NVENC,
+        "ffmpeg": _FFMPEG_PATH,
+        "zones": zones_status,
+    })
+
+
 @app.route("/api/zones/<int:zid>/detections", methods=["GET"])
 def zone_detections(zid: int):
     st = _zones.get(zid)
@@ -911,6 +1519,243 @@ def analysis():
             "alerts_by_label": dict(by_label),
         }
     )
+
+
+# ----------------- LIFEGUARD API ENDPOINTS -----------------
+
+@app.route("/api/lifeguards/register", methods=["POST"])
+def register_lifeguard():
+    """Register a new lifeguard. Returns session token."""
+    data = request.get_json() or {}
+    name = data.get("name", "").strip()
+    phone = data.get("phone", "").strip()
+    
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+    
+    with _lifeguard_lock:
+        # Check if phone already registered
+        for lg_id, lg in LIFEGUARDS.items():
+            if phone and lg.get("phone") == phone:
+                # Return existing session
+                session_token = str(uuid.uuid4())
+                LIFEGUARD_SESSIONS[session_token] = lg_id
+                lg["online"] = True
+                lg["last_seen"] = time.time()
+                _save_lifeguards()
+                return jsonify({
+                    "id": lg_id,
+                    "name": lg["name"],
+                    "phone": lg.get("phone"),
+                    "zones": lg.get("zones", []),
+                    "session_token": session_token,
+                    "message": "Welcome back!"
+                })
+        
+        # Create new lifeguard
+        lg_id = str(uuid.uuid4())[:8]
+        LIFEGUARDS[lg_id] = {
+            "id": lg_id,
+            "name": name,
+            "phone": phone,
+            "zones": [],  # Empty = all zones
+            "online": True,
+            "last_seen": time.time(),
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        session_token = str(uuid.uuid4())
+        LIFEGUARD_SESSIONS[session_token] = lg_id
+        LIFEGUARD_ALERTS[lg_id] = deque(maxlen=100)
+        _save_lifeguards()
+        
+    return jsonify({
+        "id": lg_id,
+        "name": name,
+        "phone": phone,
+        "zones": [],
+        "session_token": session_token,
+        "message": "Registration successful!"
+    }), 201
+
+
+@app.route("/api/lifeguards", methods=["GET"])
+def list_lifeguards():
+    """List all registered lifeguards (admin view)."""
+    with _lifeguard_lock:
+        return jsonify({
+            "lifeguards": list(LIFEGUARDS.values()),
+            "count": len(LIFEGUARDS)
+        })
+
+
+@app.route("/api/lifeguards/<lg_id>", methods=["GET"])
+def get_lifeguard(lg_id: str):
+    """Get lifeguard details."""
+    with _lifeguard_lock:
+        lg = LIFEGUARDS.get(lg_id)
+        if not lg:
+            return jsonify({"error": "Lifeguard not found"}), 404
+        return jsonify(lg)
+
+
+@app.route("/api/lifeguards/<lg_id>/assign", methods=["POST"])
+def assign_lifeguard_zones(lg_id: str):
+    """Assign zones to a lifeguard. Empty list = all zones."""
+    data = request.get_json() or {}
+    zones = data.get("zones", [])
+    
+    with _lifeguard_lock:
+        if lg_id not in LIFEGUARDS:
+            return jsonify({"error": "Lifeguard not found"}), 404
+        LIFEGUARDS[lg_id]["zones"] = [int(z) for z in zones]
+        _save_lifeguards()
+        
+    return jsonify({
+        "id": lg_id,
+        "zones": LIFEGUARDS[lg_id]["zones"],
+        "message": f"Assigned to zones: {zones if zones else 'ALL'}"
+    })
+
+
+@app.route("/api/lifeguards/<lg_id>/alerts", methods=["GET"])
+def get_lifeguard_alerts(lg_id: str):
+    """Get alerts for a lifeguard's assigned zones."""
+    limit = int(request.args.get("limit", "50"))
+    
+    with _lifeguard_lock:
+        if lg_id not in LIFEGUARDS:
+            return jsonify({"error": "Lifeguard not found"}), 404
+        
+        lg = LIFEGUARDS[lg_id]
+        assigned_zones = lg.get("zones", [])
+        
+        # Get alerts from history for assigned zones
+        alerts = []
+        for a in list(ALERT_HISTORY):
+            if not assigned_zones or a.get("zone") in assigned_zones:
+                alerts.append(a)
+                if len(alerts) >= limit:
+                    break
+        
+        return jsonify({
+            "lifeguard_id": lg_id,
+            "assigned_zones": assigned_zones,
+            "alerts": alerts,
+            "count": len(alerts)
+        })
+
+
+@app.route("/api/lifeguards/<lg_id>/respond", methods=["POST"])
+def lifeguard_respond(lg_id: str):
+    """Mark that lifeguard is responding to an alert."""
+    data = request.get_json() or {}
+    alert_id = data.get("alert_id")
+    zone = data.get("zone")
+    
+    with _lifeguard_lock:
+        if lg_id not in LIFEGUARDS:
+            return jsonify({"error": "Lifeguard not found"}), 404
+        
+        lg = LIFEGUARDS[lg_id]
+        response_record = {
+            "lifeguard_id": lg_id,
+            "lifeguard_name": lg["name"],
+            "alert_id": alert_id,
+            "zone": zone,
+            "responded_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Log response
+        print(f"[lifeguard] {lg['name']} responding to zone {zone}")
+        
+        return jsonify({
+            "message": f"{lg['name']} is responding to zone {zone}",
+            "response": response_record
+        })
+
+
+@app.route("/api/lifeguards/<lg_id>/heartbeat", methods=["POST"])
+def lifeguard_heartbeat(lg_id: str):
+    """Update lifeguard online status."""
+    with _lifeguard_lock:
+        if lg_id not in LIFEGUARDS:
+            return jsonify({"error": "Lifeguard not found"}), 404
+        LIFEGUARDS[lg_id]["online"] = True
+        LIFEGUARDS[lg_id]["last_seen"] = time.time()
+        _save_lifeguards()
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/lifeguards/<lg_id>/stream", methods=["GET"])
+def lifeguard_alert_stream(lg_id: str):
+    """Server-Sent Events stream for real-time alerts to lifeguard."""
+    with _lifeguard_lock:
+        if lg_id not in LIFEGUARDS:
+            return jsonify({"error": "Lifeguard not found"}), 404
+        
+        # Create SSE queue for this lifeguard
+        if lg_id not in LIFEGUARD_SSE_QUEUES:
+            LIFEGUARD_SSE_QUEUES[lg_id] = queue.Queue(maxsize=50)
+        q = LIFEGUARD_SSE_QUEUES[lg_id]
+    
+    def generate():
+        # Send initial connection message
+        yield f"data: {json.dumps({'type': 'connected', 'lifeguard_id': lg_id})}\n\n"
+        
+        while True:
+            try:
+                # Wait for alert with timeout (sends keepalive)
+                try:
+                    alert = q.get(timeout=30)
+                    yield f"data: {json.dumps({'type': 'alert', 'alert': alert})}\n\n"
+                except queue.Empty:
+                    # Send keepalive
+                    yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+            except GeneratorExit:
+                # Client disconnected
+                with _lifeguard_lock:
+                    if lg_id in LIFEGUARD_SSE_QUEUES:
+                        del LIFEGUARD_SSE_QUEUES[lg_id]
+                break
+    
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@app.route("/api/admin/broadcast", methods=["POST"])
+def admin_broadcast():
+    """Admin: Send manual alert to all lifeguards or specific zones."""
+    data = request.get_json() or {}
+    message = data.get("message", "Manual alert from admin")
+    zones = data.get("zones", [])  # Empty = all
+    
+    alert = {
+        "type": "admin_alert",
+        "message": message,
+        "zones": zones,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "id": str(uuid.uuid4())[:8]
+    }
+    
+    with _lifeguard_lock:
+        for lg_id, lg in LIFEGUARDS.items():
+            assigned = lg.get("zones", [])
+            # Send if no specific zones, or lifeguard is assigned to one of the zones
+            if not zones or not assigned or any(z in assigned for z in zones):
+                if lg_id in LIFEGUARD_SSE_QUEUES:
+                    try:
+                        LIFEGUARD_SSE_QUEUES[lg_id].put_nowait(alert)
+                    except:
+                        pass
+    
+    return jsonify({"message": "Broadcast sent", "alert": alert})
 
 
 if __name__ == "__main__":

@@ -88,7 +88,7 @@ if ($Stop) {
 if ($Detach) {
   $args = @(
     "-m", "waitress",
-    "--listen=127.0.0.1:8000",
+    "--listen=0.0.0.0:8000",
     "--threads=32",
     "backend.server:app"
   )
@@ -108,4 +108,4 @@ if ($Detach) {
   exit 0
 }
 
-& $python -m waitress --listen=127.0.0.1:8000 --threads=32 backend.server:app
+& $python -m waitress --listen=0.0.0.0:8000 --threads=32 backend.server:app
