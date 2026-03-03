@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "CoastVision Lifeguard",
+    "slug": "coastvision-lifeguard",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0d47a1"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.coastvision.lifeguard"
+    },
+    "android": {
+      "package": "com.coastvision.lifeguard",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "backgroundColor": "#0d47a1",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "permissions": [
+        "VIBRATE",
+        "INTERNET",
+        "ACCESS_NETWORK_STATE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "coastvision-lifeguard"
+      }
+    }
+  }
+}

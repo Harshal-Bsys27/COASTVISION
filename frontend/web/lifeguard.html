@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#1976d2">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="CoastVision Lifeguard">
+    <title>CoastVision Lifeguard</title>
+    <link rel="manifest" href="manifest.json">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #0d47a1 0%, #1565c0 50%, #1976d2 100%);
+            min-height: 100vh;
+            color: white;
+        }
+        
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        /* Header */
+        .header {
+            text-align: center;
+            padding: 20px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            margin-bottom: 20px;
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        
+        .header .logo {
+            font-size: 32px;
+        }
+        
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+        
+        .status-online {
+            background: rgba(76, 175, 80, 0.3);
+            border: 1px solid #4caf50;
+        }
+        
+        .status-offline {
+            background: rgba(244, 67, 54, 0.3);
+            border: 1px solid #f44336;
+        }
+        
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4caf50;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.2); }
+        }
+        
+        /* Login Form */
+        .login-card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        
+        .login-card h2 {
+            font-size: 20px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 8px;
+            opacity: 0.9;
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 14px 16px;
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.3);
+            background: rgba(255,255,255,0.1);
+            color: white;
+            font-size: 16px;
+            outline: none;
+            transition: all 0.3s;
+        }
+        
+        .form-group input::placeholder {
+            color: rgba(255,255,255,0.5);
+        }
+        
+        .form-group input:focus {
+            border-color: white;
+            background: rgba(255,255,255,0.15);
+        }
+        
+        .btn {
+            width: 100%;
+            padding: 16px;
+            border-radius: 12px;
+            border: none;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: white;
+            color: #1565c0;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        }
+        
+        .btn-danger {
+            background: #f44336;
+            color: white;
+        }
+        
+        .btn-success {
+            background: #4caf50;
+            color: white;
+        }
+        
+        /* Dashboard */
+        .dashboard {
+            display: none;
+        }
+        
+        .dashboard.active {
+            display: block;
+        }
+        
+        .login-card.hidden {
+            display: none;
+        }
+        
+        .user-info {
+            background: rgba(255,255,255,0.1);
+            border-radius: 16px;
+            padding: 16px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .user-info .name {
+            font-weight: 600;
+            font-size: 18px;
+        }
+        
+        .user-info .zones {
+            font-size: 12px;
+            opacity: 0.8;
+            margin-top: 4px;
+        }
+        
+        .logout-btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.3);
+            background: transparent;
+            color: white;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        
+        /* Alert Cards */
+        .section-title {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            opacity: 0.7;
+            margin-bottom: 12px;
+        }
+        
+        .alerts-container {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        
+        .alert-card {
+            background: rgba(255,255,255,0.95);
+            border-radius: 16px;
+            padding: 16px;
+            color: #333;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .alert-card.alert-drowning {
+            border-left: 4px solid #f44336;
+            background: linear-gradient(135deg, #fff 0%, #ffebee 100%);
+        }
+        
+        .alert-card.alert-admin {
+            border-left: 4px solid #ff9800;
+            background: linear-gradient(135deg, #fff 0%, #fff3e0 100%);
+        }
+        
+        .alert-card.alert-normal {
+            border-left: 4px solid #4caf50;
+        }
+        
+        .alert-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10px;
+        }
+        
+        .alert-zone {
+            font-size: 20px;
+            font-weight: 700;
+            color: #1565c0;
+        }
+        
+        .alert-time {
+            font-size: 11px;
+            color: #666;
+            text-align: right;
+        }
+        
+        .alert-label {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+        
+        .label-drowning {
+            background: #f44336;
+            color: white;
+        }
+        
+        .label-admin {
+            background: #ff9800;
+            color: white;
+        }
+        
+        .alert-confidence {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 12px;
+        }
+        
+        .respond-btn {
+            width: 100%;
+            padding: 12px;
+            border-radius: 10px;
+            border: none;
+            background: #1565c0;
+            color: white;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        
+        .respond-btn:hover {
+            background: #0d47a1;
+        }
+        
+        .respond-btn.responded {
+            background: #4caf50;
+        }
+        
+        /* No Alerts */
+        .no-alerts {
+            text-align: center;
+            padding: 40px 20px;
+            opacity: 0.7;
+        }
+        
+        .no-alerts .icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+        
+        /* Connection Status */
+        .connection-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 8px;
+            text-align: center;
+            font-size: 12px;
+            font-weight: 500;
+            z-index: 1000;
+        }
+        
+        .connection-bar.connected {
+            background: #4caf50;
+        }
+        
+        .connection-bar.disconnected {
+            background: #f44336;
+        }
+        
+        .connection-bar.connecting {
+            background: #ff9800;
+        }
+        
+        /* Vibration animation for new alerts */
+        @keyframes vibrate {
+            0%, 100% { transform: translateX(0); }
+            10%, 30%, 50%, 70%, 90% { transform: translateX(-2px); }
+            20%, 40%, 60%, 80% { transform: translateX(2px); }
+        }
+        
+        .alert-card.new-alert {
+            animation: vibrate 0.5s, slideIn 0.3s ease;
+        }
+        
+        /* Bottom safe area for mobile */
+        .bottom-spacer {
+            height: 80px;
+        }
+    </style>
+</head>
+<body>
+    <div class="connection-bar connecting" id="connectionBar">
+        Connecting to server...
+    </div>
+    
+    <div class="container">
+        <div class="header">
+            <h1><span class="logo">🏖️</span> CoastVision</h1>
+            <p style="opacity: 0.8; margin-top: 4px;">Lifeguard Alert System</p>
+        </div>
+        
+        <!-- Login Form -->
+        <div class="login-card" id="loginCard">
+            <h2>👋 Lifeguard Login</h2>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label>Your Name</label>
+                    <input type="text" id="nameInput" placeholder="Enter your name" required>
+                </div>
+                <div class="form-group">
+                    <label>Phone Number (Optional)</label>
+                    <input type="tel" id="phoneInput" placeholder="For quick contact">
+                </div>
+                <button type="submit" class="btn btn-primary">
+                    Start Monitoring
+                </button>
+            </form>
+        </div>
+        
+        <!-- Dashboard -->
+        <div class="dashboard" id="dashboard">
+            <div class="user-info">
+                <div>
+                    <div class="name" id="userName">Lifeguard</div>
+                    <div class="zones" id="userZones">Monitoring: All Zones</div>
+                </div>
+                <button class="logout-btn" onclick="logout()">Logout</button>
+            </div>
+            
+            <div class="status-badge status-online" id="statusBadge">
+                <div class="pulse-dot"></div>
+                <span>Live Monitoring</span>
+            </div>
+            
+            <div style="margin-top: 24px;">
+                <div class="section-title">🚨 Recent Alerts</div>
+                <div class="alerts-container" id="alertsContainer">
+                    <div class="no-alerts">
+                        <div class="icon">✅</div>
+                        <div>All Clear</div>
+                        <div style="font-size: 12px; margin-top: 4px;">No active alerts</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="bottom-spacer"></div>
+        </div>
+    </div>
+    
+    <script>
+        // Configuration
+        const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+            ? 'http://127.0.0.1:8000'
+            : `${window.location.protocol}//${window.location.hostname}:8000`;
+        
+        // State
+        let lifeguardId = localStorage.getItem('lifeguardId');
+        let lifeguardName = localStorage.getItem('lifeguardName');
+        let sessionToken = localStorage.getItem('sessionToken');
+        let eventSource = null;
+        let alerts = [];
+        let isConnected = false;
+        
+        // Elements
+        const loginCard = document.getElementById('loginCard');
+        const dashboard = document.getElementById('dashboard');
+        const connectionBar = document.getElementById('connectionBar');
+        const alertsContainer = document.getElementById('alertsContainer');
+        const userName = document.getElementById('userName');
+        const userZones = document.getElementById('userZones');
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            if (lifeguardId && lifeguardName) {
+                showDashboard();
+            } else {
+                showLogin();
+            }
+        });
+        
+        // Login Form
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const name = document.getElementById('nameInput').value.trim();
+            const phone = document.getElementById('phoneInput').value.trim();
+            
+            if (!name) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/lifeguards/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, phone })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    lifeguardId = data.id;
+                    lifeguardName = data.name;
+                    sessionToken = data.session_token;
+                    
+                    localStorage.setItem('lifeguardId', lifeguardId);
+                    localStorage.setItem('lifeguardName', lifeguardName);
+                    localStorage.setItem('sessionToken', sessionToken);
+                    
+                    showDashboard();
+                } else {
+                    alert(data.error || 'Registration failed');
+                }
+            } catch (err) {
+                alert('Cannot connect to server. Make sure backend is running.');
+                console.error(err);
+            }
+        });
+        
+        function showLogin() {
+            loginCard.classList.remove('hidden');
+            dashboard.classList.remove('active');
+            updateConnectionBar('disconnected', 'Not logged in');
+        }
+        
+        function showDashboard() {
+            loginCard.classList.add('hidden');
+            dashboard.classList.add('active');
+            userName.textContent = lifeguardName;
+            
+            // Start SSE connection
+            connectSSE();
+            
+            // Load existing alerts
+            loadAlerts();
+            
+            // Start heartbeat
+            startHeartbeat();
+        }
+        
+        function logout() {
+            localStorage.removeItem('lifeguardId');
+            localStorage.removeItem('lifeguardName');
+            localStorage.removeItem('sessionToken');
+            
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            
+            lifeguardId = null;
+            lifeguardName = null;
+            sessionToken = null;
+            alerts = [];
+            
+            showLogin();
+        }
+        
+        function connectSSE() {
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            updateConnectionBar('connecting', 'Connecting...');
+            
+            eventSource = new EventSource(`${API_BASE}/api/lifeguards/${lifeguardId}/stream`);
+            
+            eventSource.onopen = () => {
+                isConnected = true;
+                updateConnectionBar('connected', 'Connected - Live Monitoring');
+            };
+            
+            eventSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'alert') {
+                        handleNewAlert(data.alert);
+                    } else if (data.type === 'connected') {
+                        console.log('SSE connected:', data);
+                    }
+                } catch (err) {
+                    console.error('SSE parse error:', err);
+                }
+            };
+            
+            eventSource.onerror = () => {
+                isConnected = false;
+                updateConnectionBar('disconnected', 'Disconnected - Reconnecting...');
+                
+                // Reconnect after 3 seconds
+                setTimeout(() => {
+                    if (!isConnected && lifeguardId) {
+                        connectSSE();
+                    }
+                }, 3000);
+            };
+        }
+        
+        function updateConnectionBar(status, text) {
+            connectionBar.className = 'connection-bar ' + status;
+            connectionBar.textContent = text;
+        }
+        
+        async function loadAlerts() {
+            try {
+                const response = await fetch(`${API_BASE}/api/lifeguards/${lifeguardId}/alerts?limit=20`);
+                const data = await response.json();
+                
+                if (data.alerts) {
+                    alerts = data.alerts;
+                    renderAlerts();
+                    
+                    // Update zones display
+                    if (data.assigned_zones && data.assigned_zones.length > 0) {
+                        userZones.textContent = `Monitoring: Zone ${data.assigned_zones.join(', ')}`;
+                    } else {
+                        userZones.textContent = 'Monitoring: All Zones';
+                    }
+                }
+            } catch (err) {
+                console.error('Failed to load alerts:', err);
+            }
+        }
+        
+        function handleNewAlert(alert) {
+            // Add to beginning of array
+            alerts.unshift(alert);
+            
+            // Keep only last 50
+            if (alerts.length > 50) {
+                alerts = alerts.slice(0, 50);
+            }
+            
+            renderAlerts(true);
+            
+            // Vibrate if supported
+            if ('vibrate' in navigator) {
+                navigator.vibrate([200, 100, 200, 100, 200]);
+            }
+            
+            // Play sound
+            playAlertSound();
+            
+            // Show notification if permitted
+            showNotification(alert);
+        }
+        
+        function renderAlerts(isNew = false) {
+            if (alerts.length === 0) {
+                alertsContainer.innerHTML = `
+                    <div class="no-alerts">
+                        <div class="icon">✅</div>
+                        <div>All Clear</div>
+                        <div style="font-size: 12px; margin-top: 4px;">No active alerts</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            alertsContainer.innerHTML = alerts.map((alert, index) => {
+                const isAdmin = alert.type === 'admin_alert';
+                const isDrowning = (alert.label || '').toLowerCase().includes('drown');
+                const cardClass = isAdmin ? 'alert-admin' : (isDrowning ? 'alert-drowning' : 'alert-normal');
+                const labelClass = isAdmin ? 'label-admin' : 'label-drowning';
+                const newClass = isNew && index === 0 ? 'new-alert' : '';
+                
+                const timestamp = alert.timestamp || alert.ts;
+                const timeStr = timestamp ? formatTime(timestamp) : 'Just now';
+                
+                return `
+                    <div class="alert-card ${cardClass} ${newClass}">
+                        <div class="alert-header">
+                            <div class="alert-zone">
+                                ${isAdmin ? '📢 Admin Alert' : `Zone ${alert.zone}`}
+                            </div>
+                            <div class="alert-time">${timeStr}</div>
+                        </div>
+                        <div class="alert-label ${labelClass}">
+                            ${isAdmin ? 'BROADCAST' : (alert.label || 'ALERT')}
+                        </div>
+                        ${alert.message ? `<div class="alert-confidence">${alert.message}</div>` : ''}
+                        ${alert.conf ? `<div class="alert-confidence">Confidence: ${(alert.conf * 100).toFixed(0)}%</div>` : ''}
+                        <button class="respond-btn" onclick="respondToAlert('${alert.id || index}', ${alert.zone || 0})">
+                            🏃 I'm Responding
+                        </button>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        async function respondToAlert(alertId, zone) {
+            const btn = event.target;
+            btn.classList.add('responded');
+            btn.innerHTML = '✓ Response Recorded';
+            btn.disabled = true;
+            
+            try {
+                await fetch(`${API_BASE}/api/lifeguards/${lifeguardId}/respond`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ alert_id: alertId, zone })
+                });
+            } catch (err) {
+                console.error('Failed to record response:', err);
+            }
+        }
+        
+        function formatTime(timestamp) {
+            try {
+                const date = new Date(timestamp);
+                const now = new Date();
+                const diffMs = now - date;
+                const diffMins = Math.floor(diffMs / 60000);
+                
+                if (diffMins < 1) return 'Just now';
+                if (diffMins < 60) return `${diffMins}m ago`;
+                
+                const diffHours = Math.floor(diffMins / 60);
+                if (diffHours < 24) return `${diffHours}h ago`;
+                
+                return date.toLocaleDateString();
+            } catch {
+                return timestamp;
+            }
+        }
+        
+        function startHeartbeat() {
+            setInterval(async () => {
+                if (lifeguardId) {
+                    try {
+                        await fetch(`${API_BASE}/api/lifeguards/${lifeguardId}/heartbeat`, {
+                            method: 'POST'
+                        });
+                    } catch (err) {
+                        // Silent fail
+                    }
+                }
+            }, 30000); // Every 30 seconds
+        }
+        
+        function playAlertSound() {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
+                oscillator.frequency.value = 880;
+                oscillator.type = 'sine';
+                gainNode.gain.value = 0.3;
+                
+                oscillator.start();
+                setTimeout(() => {
+                    oscillator.stop();
+                    audioContext.close();
+                }, 200);
+            } catch (err) {
+                // Audio not supported
+            }
+        }
+        
+        async function showNotification(alert) {
+            if ('Notification' in window && Notification.permission === 'granted') {
+                const isAdmin = alert.type === 'admin_alert';
+                new Notification(isAdmin ? '📢 Admin Alert' : `🚨 Zone ${alert.zone} Alert`, {
+                    body: alert.message || alert.label || 'Check immediately!',
+                    icon: '🏖️',
+                    vibrate: [200, 100, 200],
+                    requireInteraction: true
+                });
+            }
+        }
+        
+        // Request notification permission
+        if ('Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+        
+        // Register service worker for PWA
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').catch(() => {});
+        }
+    </script>
+</body>
+</html>
