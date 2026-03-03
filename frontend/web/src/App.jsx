@@ -1,6 +1,20 @@
 ﻿import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
 import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip as ChartTooltip,
+  Legend,
+  TimeScale,
+  Filler,
+} from 'chart.js';
+import { Line } from 'react-chartjs-2';
+import 'chartjs-adapter-date-fns';
+import {
   AppBar,
   Box,
   Button,
@@ -19,6 +33,10 @@ import {
   Badge,
   Tooltip,
   LinearProgress,
+  TextField,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import PauseIcon from "@mui/icons-material/Pause";
@@ -54,6 +72,19 @@ import EditIcon from "@mui/icons-material/Edit";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
+
+// Register Chart.js components
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  ChartTooltip,
+  Legend,
+  TimeScale,
+  Filler
+);
 
 const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
@@ -535,6 +566,265 @@ const speakAnnouncement = (message, rate = 0.9) => {
   }
 };
 
+// ===================== PERSON COUNT TIMELINE COMPONENT =====================
+function PersonCountTimeline({ api, zoneId, zoneName }) {
+  const timelineData = usePollJson(`${api}/api/zones/${zoneId}/timeline`, 5000, true, { timeline: [] });
+  const colors = ["#2dd4bf","#34d399","#f59e0b","#a78bfa","#f472b6","#22d3ee"];
+  const accentColor = colors[((zoneId || 1) - 1) % colors.length];
+
+  const { chartData, currentCount, peakCount, avgCount, dataPoints } = useMemo(() => {
+    const empty = {
+      chartData: { labels: [], datasets: [{ label: "People", data: [], borderColor: accentColor, backgroundColor: "transparent", tension: 0.35 }] },
+      currentCount: 0, peakCount: 0, avgCount: 0, dataPoints: 0,
+    };
+    if (!timelineData?.timeline?.length) return empty;
+
+    const now = Date.now();
+    const last24h = timelineData.timeline.filter(p => (now - p.timestamp * 1000) < 24 * 60 * 60 * 1000);
+    if (!last24h.length) return empty;
+
+    const counts = last24h.map(p => p.count);
+    const peak = Math.max(...counts);
+    const avg = counts.reduce((a, b) => a + b, 0) / counts.length;
+    const current = counts[counts.length - 1];
+
+    return {
+      chartData: {
+        labels: last24h.map(p => new Date(p.timestamp * 1000)),
+        datasets: [{
+          label: "People Detected",
+          data: counts,
+          borderColor: accentColor,
+          backgroundColor: (ctx) => {
+            if (!ctx.chart.chartArea) return "transparent";
+            const { top, bottom } = ctx.chart.chartArea;
+            const grad = ctx.chart.ctx.createLinearGradient(0, top, 0, bottom);
+            grad.addColorStop(0, accentColor + "40");
+            grad.addColorStop(0.6, accentColor + "10");
+            grad.addColorStop(1, "transparent");
+            return grad;
+          },
+          borderWidth: 2.5,
+          tension: 0.35,
+          fill: true,
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          pointHoverBackgroundColor: accentColor,
+          pointHoverBorderColor: "#fff",
+          pointHoverBorderWidth: 2,
+        }],
+      },
+      currentCount: current,
+      peakCount: peak,
+      avgCount: avg,
+      dataPoints: last24h.length,
+    };
+  }, [timelineData, zoneName, accentColor]);
+
+  const chartOptions = useMemo(() => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 400 },
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { display: false },
+      title: { display: false },
+      tooltip: {
+        backgroundColor: "rgba(15,25,35,0.95)",
+        titleColor: "#fff",
+        bodyColor: "rgba(255,255,255,0.85)",
+        borderColor: accentColor + "50",
+        borderWidth: 1,
+        padding: 12,
+        cornerRadius: 8,
+        titleFont: { size: 13, weight: "bold" },
+        bodyFont: { size: 12 },
+        displayColors: false,
+        callbacks: {
+          title: (items) => {
+            if (!items.length) return "";
+            const d = new Date(items[0].parsed.x);
+            return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          },
+          label: (item) => `People in zone: ${item.parsed.y}`,
+        },
+      },
+    },
+    scales: {
+      x: {
+        type: "time",
+        time: { unit: "minute", stepSize: 5, displayFormats: { minute: "HH:mm", hour: "HH:mm" } },
+        title: { display: true, text: "Time", color: "rgba(255,255,255,0.5)", font: { size: 12, weight: "600" }, padding: { top: 8 } },
+        ticks: { color: "rgba(255,255,255,0.45)", font: { size: 11 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
+        grid: { color: "rgba(255,255,255,0.04)", drawBorder: false },
+        border: { display: false },
+      },
+      y: {
+        beginAtZero: true,
+        title: { display: true, text: "People Count", color: "rgba(255,255,255,0.5)", font: { size: 12, weight: "600" }, padding: { bottom: 8 } },
+        ticks: {
+          color: "rgba(255,255,255,0.45)",
+          font: { size: 11 },
+          stepSize: 1,
+          precision: 0,
+          padding: 8,
+          callback: (v) => Number.isInteger(v) ? v : "",
+        },
+        grid: { color: "rgba(255,255,255,0.04)", drawBorder: false },
+        border: { display: false },
+      },
+    },
+  }), [accentColor]);
+
+  return (
+    <Box sx={{ borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+      {/* Card Header */}
+      <Box sx={{ px: 3, pt: 2.5, pb: 1.5, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+          <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: accentColor, boxShadow: `0 0 8px ${accentColor}60` }} />
+          <Typography sx={{ fontWeight: 800, fontSize: 16, color: "#fff" }}>{zoneName}</Typography>
+        </Box>
+        <Chip
+          label={dataPoints > 0 ? `${dataPoints} data points` : "Waiting..."}
+          size="small"
+          sx={{ bgcolor: "rgba(255,255,255,0.04)", color: "rgba(255,255,255,0.45)", fontWeight: 600, fontSize: 11, height: 24 }}
+        />
+      </Box>
+
+      {/* Stats Row */}
+      <Box sx={{ px: 3, pb: 2, display: "flex", gap: 2 }}>
+        {[
+          { label: "Current", value: currentCount, icon: "👤" },
+          { label: "Peak", value: peakCount, icon: "📈" },
+          { label: "Average", value: avgCount.toFixed(1), icon: "📊" },
+        ].map((s) => (
+          <Box key={s.label} sx={{ flex: 1, py: 1.5, px: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.04)", textAlign: "center" }}>
+            <Typography sx={{ fontSize: 12, mb: 0.25 }}>{s.icon}</Typography>
+            <Typography sx={{ fontSize: 22, fontWeight: 900, color: s.label === "Current" ? accentColor : "#fff", lineHeight: 1.1 }}>{s.value}</Typography>
+            <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.4)", fontWeight: 600, mt: 0.5, textTransform: "uppercase", letterSpacing: "0.5px" }}>{s.label}</Typography>
+          </Box>
+        ))}
+      </Box>
+
+      {/* Chart */}
+      <Box sx={{ px: 2, pb: 2, height: 240 }}>
+        {dataPoints > 0 ? (
+          <Line data={chartData} options={chartOptions} />
+        ) : (
+          <Box sx={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1 }}>
+            <TrendingUpIcon sx={{ fontSize: 36, color: "rgba(255,255,255,0.08)" }} />
+            <Typography sx={{ color: "rgba(255,255,255,0.3)", fontSize: 13 }}>Collecting data...</Typography>
+            <Typography sx={{ color: "rgba(255,255,255,0.2)", fontSize: 11 }}>Person counts will appear here as the system detects people</Typography>
+          </Box>
+        )}
+      </Box>
+
+      {/* Axis Legend */}
+      <Box sx={{ px: 3, pb: 2, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.25)", fontStyle: "italic" }}>
+          X-axis: Time (HH:MM) &nbsp;|&nbsp; Y-axis: Number of people detected in zone
+        </Typography>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+          <Box sx={{ width: 16, height: 2, bgcolor: accentColor, borderRadius: 1 }} />
+          <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>Live count</Typography>
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+// ===================== ZONE NAME EDITOR COMPONENT =====================
+function ZoneNameEditor({ zoneId, currentName, api, onNameChanged }) {
+  const [open, setOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const response = await fetch(`${api}/api/zones/${zoneId}/name`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName.trim() })
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        if (onNameChanged) onNameChanged(data.name);
+        setOpen(false);
+      }
+    } catch (error) {
+      console.error('Failed to save zone name:', error);
+    }
+    setSaving(false);
+  };
+
+  const handleOpen = () => {
+    setNewName(currentName.startsWith('Zone ') ? '' : currentName);
+    setOpen(true);
+  };
+
+  return (
+    <>
+      <Chip
+        icon={<EditIcon sx={{ fontSize: 14 }} />}
+        label={currentName}
+        onClick={handleOpen}
+        sx={{
+          bgcolor: "rgba(45,212,191,0.15)",
+          color: "#2dd4bf",
+          fontWeight: 700,
+          cursor: "pointer",
+          "&:hover": { bgcolor: "rgba(45,212,191,0.25)" }
+        }}
+      />
+      
+      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ bgcolor: "#0c1621", color: "#fff" }}>
+          Rename Zone {zoneId}
+        </DialogTitle>
+        <DialogContent sx={{ bgcolor: "#0c1621", pt: 3 }}>
+          <TextField
+            autoFocus
+            fullWidth
+            label="Zone Name"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="e.g., North Beach, Swimming Pool"
+            sx={{
+              "& .MuiOutlinedInput-root": {
+                color: "#fff",
+                "& fieldset": { borderColor: "rgba(255,255,255,0.3)" },
+                "&:hover fieldset": { borderColor: "#2dd4bf" },
+                "&.Mui-focused fieldset": { borderColor: "#2dd4bf" }
+              },
+              "& .MuiInputLabel-root": { color: "rgba(255,255,255,0.7)" }
+            }}
+          />
+        </DialogContent>
+        <DialogActions sx={{ bgcolor: "#0c1621", p: 3 }}>
+          <Button onClick={() => setOpen(false)} sx={{ color: "rgba(255,255,255,0.7)" }}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleSave}
+            disabled={saving || !newName.trim()}
+            variant="contained"
+            sx={{
+              bgcolor: "#2dd4bf",
+              color: "#000",
+              fontWeight: 700,
+              "&:hover": { bgcolor: "#14b8a6" }
+            }}
+          >
+            {saving ? "Saving..." : "Save"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
+}
+
 
 // ===================== VIDEO MANAGER COMPONENT =====================
 function VideoManager({ api, onReload }) {
@@ -794,6 +1084,7 @@ export default function App() {
   const [tab, setTab] = useState(0);
   const [paused, setPaused] = useState(false);
   const [openZone, setOpenZone] = useState(null);
+  const [analyticsSection, setAnalyticsSection] = useState("overview");
   
   // Quick win states
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -806,6 +1097,7 @@ export default function App() {
   const [modalMjpegOk, setModalMjpegOk] = useState(false);
 
   const [modalBlobUrl, setModalBlobUrl] = useState("");
+  const [zoneNames, setZoneNames] = useState(new Map());
   const modalBlobUrlRef = useRef("");
   const modalVideoBoxRef = useRef(null);
   const modalVideoRef = useRef(null);
@@ -820,6 +1112,19 @@ export default function App() {
   const zonesResp = usePollJson(`${API}/api/zones`, 1200, true, { items: [] });
   const zones = useMemo(() => (zonesResp.items || []).map((x) => x.id).filter((x) => Number.isFinite(x)), [zonesResp]);
   const zoneMeta = useMemo(() => new Map((zonesResp.items || []).map((x) => [x.id, x])), [zonesResp]);
+
+  // Update zone names when zones data changes
+  useEffect(() => {
+    if (zonesResp.items) {
+      const newNames = new Map();
+      zonesResp.items.forEach(item => {
+        if (item.name) {
+          newNames.set(item.id, item.name);
+        }
+      });
+      setZoneNames(newNames);
+    }
+  }, [zonesResp.items]);
 
   useEffect(() => {
     // FIX: don't auto-close the modal while zones are still loading (zones can be [] briefly)
@@ -1388,7 +1693,16 @@ export default function App() {
                       <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
                         <Avatar sx={{ background: "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", width: 48, height: 48, fontSize: 18, fontWeight: 900, color: "#071520", boxShadow: "0 4px 20px rgba(45,212,191,0.3)" }}>{z}</Avatar>
                         <Box>
-                          <Typography sx={{ fontWeight: 900, fontSize: 20, letterSpacing: -0.3, color: "#fff" }}>Zone {z}</Typography>
+                          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                            <ZoneNameEditor
+                              zoneId={z}
+                              currentName={zoneNames.get(z) || `Zone ${z}`}
+                              api={API}
+                              onNameChanged={(newName) => {
+                                setZoneNames(prev => new Map(prev.set(z, newName)));
+                              }}
+                            />
+                          </Box>
                           <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 600, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={meta.filename || ""}>{exists ? (meta.filename || "Live Feed") : "No Video Source"}</Typography>
                         </Box>
                       </Box>
@@ -1425,7 +1739,7 @@ export default function App() {
         {tab === 1 && (
           <Box>
             {/* Header */}
-            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 4 }}>
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 3 }}>
               <Box>
                 <Typography sx={{ fontWeight: 900, fontSize: 28, color: "#fff", display: "flex", alignItems: "center", gap: 2 }}>
                   <Box sx={{ p: 1.5, borderRadius: 2, background: "linear-gradient(135deg, rgba(45,212,191,0.2) 0%, rgba(45,212,191,0.05) 100%)", display: "flex", border: "1px solid rgba(45,212,191,0.15)" }}>
@@ -1441,15 +1755,15 @@ export default function App() {
               </Box>
             </Box>
 
-            {/* Key Metrics Row */}
-            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "repeat(2, 1fr)", lg: "repeat(4, 1fr)" }, gap: 3, mb: 4 }}>
+            {/* Key Metrics Row — always visible */}
+            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "repeat(2, 1fr)", lg: "repeat(4, 1fr)" }, gap: 3, mb: 3 }}>
               {[
                 { title: "Total Detections", value: analysis.alerts_total ?? 0, icon: "📊", gradient: "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", accent: "#2dd4bf" },
                 { title: "Monitored Zones", value: zones.length, icon: "🎯", gradient: "linear-gradient(135deg, #34d399 0%, #10b981 100%)", accent: "#34d399" },
                 { title: "Emergency Alerts", value: emergencyCount, icon: "🚨", gradient: "linear-gradient(135deg, #ff5252 0%, #cc4141 100%)", accent: "#ff5252" },
                 { title: "Avg Confidence", value: `${((alerts.items?.reduce((a, b) => a + (b.conf || 0), 0) / Math.max(1, alerts.items?.length || 1)) * 100).toFixed(0)}%`, icon: "⚡", gradient: "linear-gradient(135deg, #ffab00 0%, #ff8f00 100%)", accent: "#ffab00" },
               ].map((card) => (
-                <Box key={card.title} sx={{ p: 3, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", transition: "all 0.3s ease", boxShadow: "0 4px 20px rgba(0,0,0,0.25)", "&:hover": { transform: "translateY(-4px)", boxShadow: "0 12px 40px rgba(0,0,0,0.4)", borderColor: "rgba(255,255,255,0.12)" } }}>
+                <Box key={card.title} sx={{ p: 3, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
                   <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2 }}>
                     <Box sx={{ p: 1.5, borderRadius: 2, background: card.gradient, boxShadow: "0 4px 15px rgba(0,0,0,0.3)" }}>
                       <Typography sx={{ fontSize: 24 }}>{card.icon}</Typography>
@@ -1461,279 +1775,367 @@ export default function App() {
               ))}
             </Box>
 
-            {/* Main Charts Grid - Pie Chart and Bar Chart */}
-            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "420px 1fr" }, gap: 4, mb: 4 }}>
-              
-              {/* Professional Pie Chart - Detection Types */}
-              <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
-                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 4 }}>
-                  <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Detection Types</Typography>
-                  <Chip label="Distribution" size="small" sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 600, fontSize: 12, height: 26 }} />
-                </Box>
+            {/* ── Analytics Sub-Section Tabs ── */}
+            <Box sx={{ 
+              display: "flex", gap: 1, mb: 3, p: 0.75, borderRadius: 3, bgcolor: "#0a1018", 
+              border: "1px solid rgba(255,255,255,0.06)", overflowX: "auto",
+              "&::-webkit-scrollbar": { height: 0 }
+            }}>
+              {[
+                { key: "overview", label: "Overview", icon: <DashboardIcon sx={{ fontSize: 18 }} /> },
+                { key: "timeline", label: "Person Count", icon: <TrendingUpIcon sx={{ fontSize: 18 }} /> },
+                { key: "detections", label: "Detections", icon: <NotificationsActiveIcon sx={{ fontSize: 18 }} /> },
+                { key: "activity", label: "Live Feed", icon: <HistoryIcon sx={{ fontSize: 18 }} /> },
+              ].map((s) => (
+                <Button
+                  key={s.key}
+                  startIcon={s.icon}
+                  onClick={() => setAnalyticsSection(s.key)}
+                  sx={{
+                    flex: { xs: 1, md: "none" },
+                    px: 3, py: 1.2,
+                    borderRadius: 2.5,
+                    fontWeight: 800,
+                    fontSize: 13,
+                    textTransform: "none",
+                    whiteSpace: "nowrap",
+                    color: analyticsSection === s.key ? "#071520" : "rgba(255,255,255,0.55)",
+                    bgcolor: analyticsSection === s.key ? "#2dd4bf" : "transparent",
+                    boxShadow: analyticsSection === s.key ? "0 4px 20px rgba(45,212,191,0.35)" : "none",
+                    transition: "all 0.25s cubic-bezier(.4,0,.2,1)",
+                    "&:hover": {
+                      bgcolor: analyticsSection === s.key ? "#14b8a6" : "rgba(255,255,255,0.06)",
+                    },
+                  }}
+                >
+                  {s.label}
+                </Button>
+              ))}
+            </Box>
+
+            {/* ── OVERVIEW SECTION ── */}
+            {analyticsSection === "overview" && (
+              <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "420px 1fr" }, gap: 4 }}>
                 
-                {Object.keys(analysis.alerts_by_label || {}).length > 0 ? (
-                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
-                    {/* SVG Pie Chart */}
-                    <Box sx={{ position: "relative", width: 240, height: 240 }}>
-                      <svg width="240" height="240" viewBox="0 0 100 100">
-                        <defs>
-                          <filter id="pieGlow" x="-50%" y="-50%" width="200%" height="200%">
-                            <feGaussianBlur stdDeviation="1.5" result="glow"/>
-                            <feMerge><feMergeNode in="glow"/><feMergeNode in="SourceGraphic"/></feMerge>
-                          </filter>
-                        </defs>
-                        <circle cx="50" cy="50" r="40" fill="transparent" stroke="rgba(255,255,255,0.03)" strokeWidth="16" />
+                {/* Pie Chart - Detection Types */}
+                <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+                  <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 4 }}>
+                    <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Detection Types</Typography>
+                    <Chip label="Distribution" size="small" sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 600, fontSize: 12, height: 26 }} />
+                  </Box>
+                  
+                  {Object.keys(analysis.alerts_by_label || {}).length > 0 ? (
+                    <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+                      <Box sx={{ position: "relative", width: 240, height: 240 }}>
+                        <svg width="240" height="240" viewBox="0 0 100 100">
+                          <defs>
+                            <filter id="pieGlow" x="-50%" y="-50%" width="200%" height="200%">
+                              <feGaussianBlur stdDeviation="1.5" result="glow"/>
+                              <feMerge><feMergeNode in="glow"/><feMergeNode in="SourceGraphic"/></feMerge>
+                            </filter>
+                          </defs>
+                          <circle cx="50" cy="50" r="40" fill="transparent" stroke="rgba(255,255,255,0.03)" strokeWidth="16" />
+                          {(() => {
+                            const entries = Object.entries(analysis.alerts_by_label || {});
+                            const total = entries.reduce((a, [, v]) => a + v, 0);
+                            const colors = ["#2dd4bf", "#ff5252", "#34d399", "#f59e0b", "#a78bfa"];
+                            let cumulative = 0;
+                            return entries.map(([label, count], i) => {
+                              const pct = (count / total) * 100;
+                              const offset = cumulative;
+                              cumulative += pct;
+                              return (
+                                <circle key={label} cx="50" cy="50" r="40" fill="transparent" stroke={colors[i % colors.length]} strokeWidth="16" strokeDasharray={`${pct * 2.51} ${251 - pct * 2.51}`} strokeDashoffset={-offset * 2.51 + 62.75} filter="url(#pieGlow)" style={{ transition: "all 0.5s ease" }} />
+                              );
+                            });
+                          })()}
+                          <circle cx="50" cy="50" r="30" fill="#0f1923" />
+                        </svg>
+                        <Box sx={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                          <Typography sx={{ fontSize: 42, fontWeight: 900, color: "#fff", lineHeight: 1, letterSpacing: "-1px" }}>{analysis.alerts_total ?? 0}</Typography>
+                          <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.45)", fontWeight: 700, mt: 0.5, letterSpacing: "2px" }}>TOTAL</Typography>
+                        </Box>
+                      </Box>
+                      
+                      <Stack spacing={1} sx={{ width: "100%" }}>
                         {(() => {
                           const entries = Object.entries(analysis.alerts_by_label || {});
                           const total = entries.reduce((a, [, v]) => a + v, 0);
                           const colors = ["#2dd4bf", "#ff5252", "#34d399", "#f59e0b", "#a78bfa"];
-                          let cumulative = 0;
                           return entries.map(([label, count], i) => {
-                            const pct = (count / total) * 100;
-                            const offset = cumulative;
-                            cumulative += pct;
+                            const pct = ((count / total) * 100).toFixed(0);
+                            const isEmergency = label.toLowerCase().includes("drown") || label.toLowerCase().includes("emerg");
                             return (
-                              <circle
-                                key={label}
-                                cx="50"
-                                cy="50"
-                                r="40"
-                                fill="transparent"
-                                stroke={colors[i % colors.length]}
-                                strokeWidth="16"
-                                strokeDasharray={`${pct * 2.51} ${251 - pct * 2.51}`}
-                                strokeDashoffset={-offset * 2.51 + 62.75}
-                                filter="url(#pieGlow)"
-                                style={{ transition: "all 0.5s ease" }}
-                              />
+                              <Box key={label} sx={{ display: "flex", alignItems: "center", gap: 2, p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", transition: "all 0.2s", "&:hover": { bgcolor: "rgba(255,255,255,0.04)" } }}>
+                                <Box sx={{ width: 12, height: 12, borderRadius: 1, bgcolor: colors[i % colors.length] }} />
+                                <Typography sx={{ flex: 1, fontSize: 15, fontWeight: 600, color: "rgba(255,255,255,0.8)", textTransform: "capitalize" }}>{label}</Typography>
+                                <Typography sx={{ fontSize: 18, fontWeight: 800, color: colors[i % colors.length] }}>{count}</Typography>
+                                <Typography sx={{ fontSize: 14, color: "rgba(255,255,255,0.5)", minWidth: 40, fontWeight: 600 }}>{pct}%</Typography>
+                                {isEmergency && <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "#ff5252", animation: "pulse 1s infinite" }} />}
+                              </Box>
                             );
                           });
                         })()}
-                        <circle cx="50" cy="50" r="30" fill="#0f1923" />
-                      </svg>
-                      <Box sx={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                        <Typography sx={{ fontSize: 42, fontWeight: 900, color: "#fff", lineHeight: 1, letterSpacing: "-1px" }}>{analysis.alerts_total ?? 0}</Typography>
-                        <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.45)", fontWeight: 700, mt: 0.5, letterSpacing: "2px" }}>TOTAL</Typography>
-                      </Box>
+                      </Stack>
                     </Box>
-                    
-                    {/* Legend */}
-                    <Stack spacing={1} sx={{ width: "100%" }}>
-                      {(() => {
-                        const entries = Object.entries(analysis.alerts_by_label || {});
-                        const total = entries.reduce((a, [, v]) => a + v, 0);
-                        const colors = ["#2dd4bf", "#ff5252", "#34d399", "#f59e0b", "#a78bfa"];
-                        return entries.map(([label, count], i) => {
-                          const pct = ((count / total) * 100).toFixed(0);
-                          const isEmergency = label.toLowerCase().includes("drown") || label.toLowerCase().includes("emerg");
+                  ) : (
+                    <Box sx={{ py: 6, textAlign: "center" }}>
+                      <Box sx={{ width: 60, height: 60, borderRadius: "50%", bgcolor: "rgba(255,255,255,0.03)", display: "flex", alignItems: "center", justifyContent: "center", mx: "auto", mb: 2 }}>
+                        <AnalyticsIcon sx={{ fontSize: 28, color: "rgba(255,255,255,0.2)" }} />
+                      </Box>
+                      <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 13 }}>No detection data</Typography>
+                    </Box>
+                  )}
+                </Box>
+
+                {/* Bar Chart - Zone Activity */}
+                <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+                  <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 4 }}>
+                    <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Zone Activity</Typography>
+                    <Chip label={`${zones.length} Zones`} size="small" sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 600, fontSize: 12, height: 26 }} />
+                  </Box>
+                  
+                  {zones.length > 0 ? (
+                    <Box>
+                      <Box sx={{ display: "flex", gap: 2, height: 320 }}>
+                        <Box sx={{ display: "flex", flexDirection: "column", justifyContent: "space-between", py: 1, pr: 1 }}>
+                          {(() => {
+                            const maxCount = Math.max(...Object.values(analysis.alerts_by_zone || { default: 0 }), 1);
+                            return [maxCount, Math.round(maxCount * 0.75), Math.round(maxCount * 0.5), Math.round(maxCount * 0.25), 0].map((val) => (
+                              <Typography key={val} sx={{ fontSize: 13, color: "rgba(255,255,255,0.4)", minWidth: 28, textAlign: "right", fontWeight: 600 }}>{val}</Typography>
+                            ));
+                          })()}
+                        </Box>
+                        <Box sx={{ flex: 1, position: "relative", borderLeft: "1px solid rgba(255,255,255,0.08)", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+                          <Box sx={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", justifyContent: "space-between", pointerEvents: "none" }}>
+                            {[0, 1, 2, 3].map((i) => (
+                              <Box key={i} sx={{ height: 1, bgcolor: "rgba(255,255,255,0.04)", width: "100%" }} />
+                            ))}
+                          </Box>
+                          <Box sx={{ display: "flex", alignItems: "flex-end", height: "100%", gap: 2, px: 2, pb: 0.5 }}>
+                            {(() => {
+                              const maxCount = Math.max(...Object.values(analysis.alerts_by_zone || { default: 1 }), 1);
+                              const colors = ["#2dd4bf", "#34d399", "#f59e0b", "#a78bfa", "#f472b6", "#22d3ee"];
+                              return zones.map((zone, idx) => {
+                                const count = (analysis.alerts_by_zone || {})[zone] || 0;
+                                const height = (count / maxCount) * 100;
+                                const color = colors[idx % colors.length];
+                                return (
+                                  <Box key={zone} sx={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", height: "100%" }}>
+                                    <Box sx={{ flex: 1, width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end" }}>
+                                      {count > 0 && <Typography sx={{ fontSize: 14, fontWeight: 800, color: color, mb: 0.5 }}>{count}</Typography>}
+                                      <Box sx={{ width: "75%", maxWidth: 56, height: `${height}%`, minHeight: count > 0 ? 12 : 3, background: `linear-gradient(180deg, ${color} 0%, ${color}70 100%)`, borderRadius: "6px 6px 0 0", boxShadow: count > 0 ? `0 0 20px ${color}30` : "none", transition: "height 0.5s ease", position: "relative", "&::before": count > 0 ? { content: '""', position: "absolute", top: 0, left: 0, right: 0, height: "40%", background: "linear-gradient(180deg, rgba(255,255,255,0.25) 0%, transparent 100%)", borderRadius: "6px 6px 0 0" } : {} }} />
+                                    </Box>
+                                  </Box>
+                                );
+                              });
+                            })()}
+                          </Box>
+                        </Box>
+                      </Box>
+                      <Box sx={{ display: "flex", pl: 4, mt: 1.5 }}>
+                        {zones.map((zone, idx) => {
+                          const colors = ["#2dd4bf", "#34d399", "#f59e0b", "#a78bfa", "#f472b6", "#22d3ee"];
                           return (
-                            <Box key={label} sx={{ display: "flex", alignItems: "center", gap: 2, p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", transition: "all 0.2s", "&:hover": { bgcolor: "rgba(255,255,255,0.04)" } }}>
-                              <Box sx={{ width: 12, height: 12, borderRadius: 1, bgcolor: colors[i % colors.length] }} />
-                              <Typography sx={{ flex: 1, fontSize: 15, fontWeight: 600, color: "rgba(255,255,255,0.8)", textTransform: "capitalize" }}>{label}</Typography>
-                              <Typography sx={{ fontSize: 18, fontWeight: 800, color: colors[i % colors.length] }}>{count}</Typography>
-                              <Typography sx={{ fontSize: 14, color: "rgba(255,255,255,0.5)", minWidth: 40, fontWeight: 600 }}>{pct}%</Typography>
-                              {isEmergency && <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "#ff5252", animation: "pulse 1s infinite" }} />}
+                            <Box key={zone} sx={{ flex: 1, textAlign: "center" }}>
+                              <Typography sx={{ fontSize: 14, color: colors[idx % colors.length], fontWeight: 800 }}>{zoneNames.get(zone) || `Zone ${zone}`}</Typography>
                             </Box>
                           );
-                        });
-                      })()}
-                    </Stack>
-                  </Box>
-                ) : (
-                  <Box sx={{ py: 6, textAlign: "center" }}>
-                    <Box sx={{ width: 60, height: 60, borderRadius: "50%", bgcolor: "rgba(255,255,255,0.03)", display: "flex", alignItems: "center", justifyContent: "center", mx: "auto", mb: 2 }}>
-                      <AnalyticsIcon sx={{ fontSize: 28, color: "rgba(255,255,255,0.2)" }} />
+                        })}
+                      </Box>
+                      <Box sx={{ display: "flex", gap: 2, mt: 3, pt: 3, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+                        {[
+                          { label: "Most Active", value: Object.entries(analysis.alerts_by_zone || {}).sort((a, b) => b[1] - a[1])[0]?.[0] ? (zoneNames.get(Number(Object.entries(analysis.alerts_by_zone || {}).sort((a, b) => b[1] - a[1])[0]?.[0])) || `Zone ${Object.entries(analysis.alerts_by_zone || {}).sort((a, b) => b[1] - a[1])[0]?.[0]}`) : "\u2014", color: "#2dd4bf" },
+                          { label: "Avg/Zone", value: zones.length > 0 ? ((analysis.alerts_total || 0) / zones.length).toFixed(1) : "0", color: "#34d399" },
+                          { label: "Coverage", value: zones.length > 0 ? `${((Object.keys(analysis.alerts_by_zone || {}).length / zones.length) * 100).toFixed(0)}%` : "0%", color: "#ffab00" },
+                        ].map((stat) => (
+                          <Box key={stat.label} sx={{ flex: 1, p: 2.5, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", textAlign: "center" }}>
+                            <Typography sx={{ fontSize: 24, fontWeight: 900, color: stat.color, letterSpacing: "-0.5px" }}>{stat.value}</Typography>
+                            <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.5)", mt: 0.5, fontWeight: 600 }}>{stat.label}</Typography>
+                          </Box>
+                        ))}
+                      </Box>
                     </Box>
-                    <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 13 }}>No detection data</Typography>
-                  </Box>
-                )}
+                  ) : (
+                    <Box sx={{ height: 260, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <Box sx={{ textAlign: "center" }}>
+                        <VideocamIcon sx={{ fontSize: 40, color: "rgba(255,255,255,0.15)", mb: 1 }} />
+                        <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 13 }}>No zones configured</Typography>
+                      </Box>
+                    </Box>
+                  )}
+                </Box>
               </Box>
+            )}
 
-              {/* Professional Bar Chart - Zone Activity */}
-              <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
-                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 4 }}>
-                  <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Zone Activity</Typography>
-                  <Chip label={`${zones.length} Zones`} size="small" sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 600, fontSize: 12, height: 26 }} />
+            {/* ── PERSON COUNT TIMELINE SECTION ── */}
+            {analyticsSection === "timeline" && (
+              <Box>
+                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 3 }}>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                    <TrendingUpIcon sx={{ color: "#2dd4bf", fontSize: 24 }} />
+                    <Box>
+                      <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Person Count Timeline</Typography>
+                      <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 13 }}>Real-time person count trends across all zones</Typography>
+                    </Box>
+                  </Box>
+                  <Chip label="Live Updates" sx={{ bgcolor: "rgba(45,212,191,0.12)", color: "#2dd4bf", fontWeight: 800, fontSize: 12, height: 28 }} />
                 </Box>
                 
                 {zones.length > 0 ? (
-                  <Box>
-                    <Box sx={{ display: "flex", gap: 2, height: 320 }}>
-                      <Box sx={{ display: "flex", flexDirection: "column", justifyContent: "space-between", py: 1, pr: 1 }}>
+                  <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "repeat(2, 1fr)" }, gap: 3 }}>
+                    {zones.map((zoneId) => (
+                      <PersonCountTimeline
+                        key={zoneId}
+                        zoneId={zoneId}
+                        zoneName={zoneNames.get(zoneId) || `Zone ${zoneId}`}
+                        api={API}
+                      />
+                    ))}
+                  </Box>
+                ) : (
+                  <Box sx={{ p: 8, textAlign: "center", borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)" }}>
+                    <TrendingUpIcon sx={{ fontSize: 48, color: "rgba(255,255,255,0.1)", mb: 2 }} />
+                    <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 16 }}>No zones available</Typography>
+                  </Box>
+                )}
+              </Box>
+            )}
+
+            {/* ── DETECTIONS SECTION ── */}
+            {analyticsSection === "detections" && (
+              <Box>
+                <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+                  <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 3 }}>
+                    <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Detection Moments</Typography>
+                    <Chip label="Timeline" size="small" sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 600, fontSize: 12, height: 26 }} />
+                  </Box>
+                  {(alerts.items || []).length > 0 ? (
+                    <Box>
+                      {/* Confidence bar chart */}
+                      <Box sx={{ display: "flex", alignItems: "flex-end", gap: "3px", height: 160, mb: 2, px: 1 }}>
                         {(() => {
-                          const maxCount = Math.max(...Object.values(analysis.alerts_by_zone || { default: 0 }), 1);
-                          return [maxCount, Math.round(maxCount * 0.75), Math.round(maxCount * 0.5), Math.round(maxCount * 0.25), 0].map((val) => (
-                            <Typography key={val} sx={{ fontSize: 13, color: "rgba(255,255,255,0.4)", minWidth: 28, textAlign: "right", fontWeight: 600 }}>{val}</Typography>
+                          const recent = (alerts.items || []).slice(0, 40).reverse();
+                          return recent.map((item, idx) => {
+                            const isEmergency = String(item.label || "").toLowerCase().includes("drown") || String(item.label || "").toLowerCase().includes("emerg");
+                            const color = isEmergency ? "#ff5252" : "#2dd4bf";
+                            const conf = (item.conf || 0.5);
+                            const h = Math.max(15, conf * 100);
+                            return (
+                              <Tooltip key={idx} title={`${item.label} (${(conf * 100).toFixed(0)}%) - Zone ${item.zone}`} arrow>
+                                <Box sx={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                                  <Box sx={{ width: "100%", height: `${h}%`, minHeight: 8, maxWidth: 20, bgcolor: color, borderRadius: "3px 3px 0 0", opacity: 0.5 + conf * 0.5, transition: "all 0.25s", cursor: "pointer", "&:hover": { opacity: 1, transform: "scaleY(1.08)" } }} />
+                                </Box>
+                              </Tooltip>
+                            );
+                          });
+                        })()}
+                      </Box>
+                      <Box sx={{ display: "flex", justifyContent: "space-between", px: 1, mb: 3 }}>
+                        <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.3)", fontWeight: 600 }}>Earliest</Typography>
+                        <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.3)", fontWeight: 600 }}>Most Recent</Typography>
+                      </Box>
+                      
+                      {/* Stats row */}
+                      <Box sx={{ display: "flex", gap: 2, pt: 3, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+                        {(() => {
+                          const items = alerts.items || [];
+                          const drowningCount = items.filter(i => String(i.label || "").toLowerCase().includes("drown")).length;
+                          const normalCount = items.length - drowningCount;
+                          return [
+                            { label: "Normal Detections", value: normalCount, color: "#2dd4bf", icon: "\uD83D\uDC41" },
+                            { label: "Emergency Events", value: drowningCount, color: "#ff5252", icon: "\uD83D\uDEA8" },
+                            { label: "Total Events", value: items.length, color: "#34d399", icon: "\uD83D\uDCCA" },
+                          ].map(s => (
+                            <Box key={s.label} sx={{ flex: 1, p: 2.5, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", textAlign: "center", border: "1px solid rgba(255,255,255,0.04)" }}>
+                              <Typography sx={{ fontSize: 16, mb: 0.5 }}>{s.icon}</Typography>
+                              <Typography sx={{ fontSize: 28, fontWeight: 900, color: s.color, letterSpacing: "-0.5px" }}>{s.value}</Typography>
+                              <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.4)", mt: 0.5, fontWeight: 600 }}>{s.label}</Typography>
+                            </Box>
                           ));
                         })()}
                       </Box>
-                      <Box sx={{ flex: 1, position: "relative", borderLeft: "1px solid rgba(255,255,255,0.08)", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-                        <Box sx={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", justifyContent: "space-between", pointerEvents: "none" }}>
-                          {[0, 1, 2, 3].map((i) => (
-                            <Box key={i} sx={{ height: 1, bgcolor: "rgba(255,255,255,0.04)", width: "100%" }} />
-                          ))}
-                        </Box>
-                        <Box sx={{ display: "flex", alignItems: "flex-end", height: "100%", gap: 2, px: 2, pb: 0.5 }}>
-                          {(() => {
-                            const maxCount = Math.max(...Object.values(analysis.alerts_by_zone || { default: 1 }), 1);
-                            const colors = ["#2dd4bf", "#34d399", "#f59e0b", "#a78bfa", "#f472b6", "#22d3ee"];
-                            return zones.map((zone, idx) => {
-                              const count = (analysis.alerts_by_zone || {})[zone] || 0;
-                              const height = (count / maxCount) * 100;
-                              const color = colors[idx % colors.length];
-                              return (
-                                <Box key={zone} sx={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", height: "100%" }}>
-                                  <Box sx={{ flex: 1, width: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end" }}>
-                                    {count > 0 && <Typography sx={{ fontSize: 14, fontWeight: 800, color: color, mb: 0.5 }}>{count}</Typography>}
-                                    <Box sx={{ width: "75%", maxWidth: 56, height: `${height}%`, minHeight: count > 0 ? 12 : 3, background: `linear-gradient(180deg, ${color} 0%, ${color}70 100%)`, borderRadius: "6px 6px 0 0", boxShadow: count > 0 ? `0 0 20px ${color}30` : "none", transition: "all 0.5s ease", position: "relative", "&::before": count > 0 ? { content: '""', position: "absolute", top: 0, left: 0, right: 0, height: "40%", background: "linear-gradient(180deg, rgba(255,255,255,0.25) 0%, transparent 100%)", borderRadius: "6px 6px 0 0" } : {}, "&:hover": { transform: "scaleY(1.05)", boxShadow: `0 0 30px ${color}50` } }} />
-                                  </Box>
-                                </Box>
-                              );
-                            });
-                          })()}
-                        </Box>
-                      </Box>
                     </Box>
-                    <Box sx={{ display: "flex", pl: 4, mt: 1.5 }}>
-                      {zones.map((zone, idx) => {
-                        const colors = ["#2dd4bf", "#34d399", "#f59e0b", "#a78bfa", "#f472b6", "#22d3ee"];
-                        return (
-                          <Box key={zone} sx={{ flex: 1, textAlign: "center" }}>
-                            <Typography sx={{ fontSize: 14, color: colors[idx % colors.length], fontWeight: 800 }}>Zone {zone}</Typography>
+                  ) : (
+                    <Box sx={{ py: 6, textAlign: "center" }}>
+                      <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 14 }}>No detection moments recorded yet</Typography>
+                    </Box>
+                  )}
+                </Box>
+
+                {/* Per-Zone Detection Breakdown */}
+                {zones.length > 0 && Object.keys(analysis.alerts_by_zone || {}).length > 0 && (
+                  <Box sx={{ mt: 3, display: "grid", gridTemplateColumns: { xs: "1fr", md: "repeat(2, 1fr)", xl: "repeat(3, 1fr)" }, gap: 3 }}>
+                    {zones.map((zoneId) => {
+                      const count = (analysis.alerts_by_zone || {})[zoneId] || 0;
+                      const colors = ["#2dd4bf", "#34d399", "#f59e0b", "#a78bfa", "#f472b6", "#22d3ee"];
+                      const color = colors[(zoneId - 1) % colors.length];
+                      const total = analysis.alerts_total || 1;
+                      const pct = ((count / total) * 100).toFixed(1);
+                      return (
+                        <Box key={zoneId} sx={{ p: 3, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)" }}>
+                          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2 }}>
+                            <Typography sx={{ fontWeight: 800, fontSize: 16, color: "#fff" }}>{zoneNames.get(zoneId) || `Zone ${zoneId}`}</Typography>
+                            <Chip label={`${pct}%`} size="small" sx={{ bgcolor: `${color}20`, color: color, fontWeight: 800, fontSize: 12 }} />
                           </Box>
-                        );
-                      })}
-                    </Box>
-                    <Box sx={{ display: "flex", gap: 2, mt: 3, pt: 3, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-                      {[
-                        { label: "Most Active", value: Object.entries(analysis.alerts_by_zone || {}).sort((a, b) => b[1] - a[1])[0]?.[0] ? `Zone ${Object.entries(analysis.alerts_by_zone || {}).sort((a, b) => b[1] - a[1])[0]?.[0]}` : "—", color: "#2dd4bf" },
-                        { label: "Avg/Zone", value: zones.length > 0 ? ((analysis.alerts_total || 0) / zones.length).toFixed(1) : "0", color: "#34d399" },
-                        { label: "Coverage", value: zones.length > 0 ? `${((Object.keys(analysis.alerts_by_zone || {}).length / zones.length) * 100).toFixed(0)}%` : "0%", color: "#ffab00" },
-                      ].map((stat) => (
-                        <Box key={stat.label} sx={{ flex: 1, p: 2.5, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", textAlign: "center" }}>
-                          <Typography sx={{ fontSize: 24, fontWeight: 900, color: stat.color, letterSpacing: "-0.5px" }}>{stat.value}</Typography>
-                          <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.5)", mt: 0.5, fontWeight: 600 }}>{stat.label}</Typography>
+                          <Box sx={{ height: 6, borderRadius: 3, bgcolor: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
+                            <Box sx={{ height: "100%", width: `${Math.min(100, (count / Math.max(...Object.values(analysis.alerts_by_zone || { d: 1 }), 1)) * 100)}%`, bgcolor: color, borderRadius: 3, transition: "width 0.5s ease" }} />
+                          </Box>
+                          <Typography sx={{ fontSize: 32, fontWeight: 900, color: color, mt: 1.5 }}>{count}</Typography>
+                          <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>detections</Typography>
                         </Box>
-                      ))}
-                    </Box>
-                  </Box>
-                ) : (
-                  <Box sx={{ height: 260, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <Box sx={{ textAlign: "center" }}>
-                      <VideocamIcon sx={{ fontSize: 40, color: "rgba(255,255,255,0.15)", mb: 1 }} />
-                      <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 13 }}>No zones configured</Typography>
-                    </Box>
+                      );
+                    })}
                   </Box>
                 )}
               </Box>
-            </Box>
+            )}
 
-            {/* Detection Moments Timeline */}
-            <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)", mb: 4 }}>
-              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 3 }}>
-                <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Detection Moments</Typography>
-                <Chip label="Timeline" size="small" sx={{ bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf", fontWeight: 600, fontSize: 12, height: 26 }} />
-              </Box>
-              {(alerts.items || []).length > 0 ? (
-                <Box>
-                  {/* Timeline bars - last 30 events bucketed by minute */}
-                  <Box sx={{ display: "flex", alignItems: "flex-end", gap: "3px", height: 120, mb: 2, px: 1 }}>
-                    {(() => {
-                      const items = alerts.items || [];
-                      // Create time buckets from the last 30 items
-                      const recent = items.slice(0, 30).reverse();
-                      const maxPerSlot = recent.length > 0 ? Math.max(1, ...recent.map(() => 1)) : 1;
-                      return recent.map((item, idx) => {
-                        const isEmergency = String(item.label || "").toLowerCase().includes("drown") || String(item.label || "").toLowerCase().includes("emerg");
-                        const color = isEmergency ? "#ff5252" : "#2dd4bf";
-                        const conf = (item.conf || 0.5);
-                        const h = Math.max(15, conf * 100);
-                        return (
-                          <Box key={idx} sx={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
-                            <Box sx={{ width: "100%", height: `${h}%`, minHeight: 8, maxWidth: 24, bgcolor: color, borderRadius: "3px 3px 0 0", opacity: 0.5 + conf * 0.5, transition: "all 0.3s", cursor: "pointer", "&:hover": { opacity: 1, transform: "scaleY(1.1)" }, position: "relative" }}>
-                              <Box sx={{ position: "absolute", top: -20, left: "50%", transform: "translateX(-50%)", opacity: 0, transition: "opacity 0.2s", "&:hover": { opacity: 1 }, whiteSpace: "nowrap" }}>
-                                <Typography sx={{ fontSize: 10, color: "#fff", bgcolor: "rgba(0,0,0,0.8)", px: 1, py: 0.25, borderRadius: 1 }}>{item.label}</Typography>
-                              </Box>
+            {/* ── LIVE ACTIVITY FEED SECTION ── */}
+            {analyticsSection === "activity" && (
+              <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 3 }}>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                    <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Recent Activity</Typography>
+                    <Chip label={`${(alerts.items || []).length} Events`} size="small" sx={{ bgcolor: "rgba(255,255,255,0.05)", color: "rgba(255,255,255,0.6)", fontWeight: 600, fontSize: 12, height: 24 }} />
+                  </Box>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                    <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "#34d399", animation: "pulse 1.5s infinite" }} />
+                    <Typography sx={{ fontSize: 11, color: "#34d399", fontWeight: 600 }}>LIVE</Typography>
+                  </Box>
+                </Box>
+                
+                <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "repeat(2, 1fr)", xl: "repeat(3, 1fr)" }, gap: 2, maxHeight: 600, overflowY: "auto", pr: 1, "&::-webkit-scrollbar": { width: 4 }, "&::-webkit-scrollbar-thumb": { bgcolor: "rgba(255,255,255,0.1)", borderRadius: 2 } }}>
+                  {(alerts.items || []).length > 0 ? (
+                    (alerts.items || []).slice(0, 30).map((alert, idx) => {
+                      const isEmergency = String(alert.label || "").toLowerCase().includes("drown") || String(alert.label || "").toLowerCase().includes("emerg");
+                      const color = isEmergency ? "#ff5252" : "#2dd4bf";
+                      return (
+                        <Box key={idx} sx={{ display: "flex", alignItems: "center", gap: 2, p: 2, borderRadius: 2, bgcolor: isEmergency ? "rgba(255,82,82,0.06)" : "rgba(45,212,191,0.04)", border: `1px solid ${isEmergency ? "rgba(255,82,82,0.15)" : "rgba(45,212,191,0.08)"}`, transition: "all 0.2s", "&:hover": { bgcolor: isEmergency ? "rgba(255,82,82,0.1)" : "rgba(45,212,191,0.08)" } }}>
+                          <Box sx={{ width: 3, height: 36, borderRadius: 1, bgcolor: color, flexShrink: 0 }} />
+                          <Box sx={{ flex: 1, minWidth: 0 }}>
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
+                              <Typography sx={{ fontSize: 12, fontWeight: 700, color: "#fff", textTransform: "capitalize" }}>{alert.label || "Detection"}</Typography>
+                              <Chip label={zoneNames.get(alert.zone) || `Z${alert.zone}`} size="small" sx={{ height: 16, fontSize: 9, fontWeight: 700, bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf" }} />
+                              {isEmergency && <Box sx={{ width: 5, height: 5, borderRadius: "50%", bgcolor: "#ff5252", animation: "pulse 0.8s infinite" }} />}
+                            </Box>
+                            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                              <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>{alert.ts}</Typography>
+                              <Typography sx={{ fontSize: 11, fontWeight: 700, color: color }}>{((alert.conf || 0) * 100).toFixed(0)}%</Typography>
                             </Box>
                           </Box>
-                        );
-                      });
-                    })()}
-                  </Box>
-                  <Box sx={{ display: "flex", justifyContent: "space-between", px: 1 }}>
-                    <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.3)", fontWeight: 600 }}>Earliest</Typography>
-                    <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.3)", fontWeight: 600 }}>Most Recent</Typography>
-                  </Box>
-                  {/* Detection type breakdown row */}
-                  <Box sx={{ display: "flex", gap: 2, mt: 3, pt: 3, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-                    {(() => {
-                      const items = alerts.items || [];
-                      const drowningCount = items.filter(i => String(i.label || "").toLowerCase().includes("drown")).length;
-                      const normalCount = items.length - drowningCount;
-                      return [
-                        { label: "Normal Detections", value: normalCount, color: "#2dd4bf", icon: "👀" },
-                        { label: "Emergency Events", value: drowningCount, color: "#ff5252", icon: "🚨" },
-                        { label: "Total Events", value: items.length, color: "#34d399", icon: "📊" },
-                      ].map(s => (
-                        <Box key={s.label} sx={{ flex: 1, p: 2.5, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", textAlign: "center", border: "1px solid rgba(255,255,255,0.04)" }}>
-                          <Typography sx={{ fontSize: 16, mb: 0.5 }}>{s.icon}</Typography>
-                          <Typography sx={{ fontSize: 28, fontWeight: 900, color: s.color, letterSpacing: "-0.5px" }}>{s.value}</Typography>
-                          <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.4)", mt: 0.5, fontWeight: 600 }}>{s.label}</Typography>
                         </Box>
-                      ));
-                    })()}
-                  </Box>
-                </Box>
-              ) : (
-                <Box sx={{ py: 6, textAlign: "center" }}>
-                  <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 14 }}>No detection moments recorded yet</Typography>
-                </Box>
-              )}
-            </Box>
-
-            {/* Live Activity Feed */}
-            <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
-              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 3 }}>
-                <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                  <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Recent Activity</Typography>
-                  <Chip label={`${(alerts.items || []).length} Events`} size="small" sx={{ bgcolor: "rgba(255,255,255,0.05)", color: "rgba(255,255,255,0.6)", fontWeight: 600, fontSize: 12, height: 24 }} />
-                </Box>
-                <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                  <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "#34d399", animation: "pulse 1.5s infinite" }} />
-                  <Typography sx={{ fontSize: 11, color: "#34d399", fontWeight: 600 }}>LIVE</Typography>
+                      );
+                    })
+                  ) : (
+                    <Box sx={{ gridColumn: "1 / -1", py: 6, textAlign: "center" }}>
+                      <HistoryIcon sx={{ fontSize: 36, color: "rgba(255,255,255,0.1)", mb: 1 }} />
+                      <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 13 }}>Waiting for activity...</Typography>
+                    </Box>
+                  )}
                 </Box>
               </Box>
-              
-              <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "repeat(2, 1fr)", xl: "repeat(3, 1fr)" }, gap: 2, maxHeight: 280, overflowY: "auto", pr: 1, "&::-webkit-scrollbar": { width: 4 }, "&::-webkit-scrollbar-thumb": { bgcolor: "rgba(255,255,255,0.1)", borderRadius: 2 } }}>
-                {(alerts.items || []).length > 0 ? (
-                  (alerts.items || []).slice(0, 12).map((alert, idx) => {
-                    const isEmergency = String(alert.label || "").toLowerCase().includes("drown") || String(alert.label || "").toLowerCase().includes("emerg");
-                    const color = isEmergency ? "#ff5252" : "#2dd4bf";
-                    return (
-                      <Box key={idx} sx={{ display: "flex", alignItems: "center", gap: 2, p: 2, borderRadius: 2, bgcolor: isEmergency ? "rgba(255,82,82,0.06)" : "rgba(45,212,191,0.04)", border: `1px solid ${isEmergency ? "rgba(255,82,82,0.15)" : "rgba(45,212,191,0.08)"}`, transition: "all 0.2s", "&:hover": { bgcolor: isEmergency ? "rgba(255,82,82,0.1)" : "rgba(45,212,191,0.08)" } }}>
-                        <Box sx={{ width: 3, height: 36, borderRadius: 1, bgcolor: color, flexShrink: 0 }} />
-                        <Box sx={{ flex: 1, minWidth: 0 }}>
-                          <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
-                            <Typography sx={{ fontSize: 12, fontWeight: 700, color: "#fff", textTransform: "capitalize" }}>{alert.label || "Detection"}</Typography>
-                            <Chip label={`Z${alert.zone}`} size="small" sx={{ height: 16, fontSize: 9, fontWeight: 700, bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf" }} />
-                            {isEmergency && <Box sx={{ width: 5, height: 5, borderRadius: "50%", bgcolor: "#ff5252", animation: "pulse 0.8s infinite" }} />}
-                          </Box>
-                          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                            <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>{alert.ts}</Typography>
-                            <Typography sx={{ fontSize: 11, fontWeight: 700, color: color }}>{((alert.conf || 0) * 100).toFixed(0)}%</Typography>
-                          </Box>
-                        </Box>
-                      </Box>
-                    );
-                  })
-                ) : (
-                  <Box sx={{ gridColumn: "1 / -1", py: 6, textAlign: "center" }}>
-                    <HistoryIcon sx={{ fontSize: 36, color: "rgba(255,255,255,0.1)", mb: 1 }} />
-                    <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 13 }}>Waiting for activity...</Typography>
-                  </Box>
-                )}
-              </Box>
-            </Box>
+            )}
           </Box>
         )}
 

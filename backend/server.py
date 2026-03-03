@@ -16,7 +16,7 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -116,6 +116,14 @@ _VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".webm", ".flv", ".wmv", ".
 _video_name_to_zid: Dict[str, int] = {}
 _next_auto_zid: int = 1
 
+# Historical person count tracking: zid -> deque of (timestamp, count) tuples
+_zone_person_history: Dict[int, deque] = {}
+# Custom zone names: zid -> custom name
+_zone_custom_names: Dict[int, str] = {}
+
+# Max history points to keep per zone (last 24 hours at 1 point per minute = 1440)
+MAX_HISTORY_POINTS = 1440
+
 
 def _find_zone_ids(video_dir: Path) -> list:
     """Return sorted list of all zone IDs for ALL video files in the video dir.
@@ -173,6 +181,51 @@ def _find_zone_ids(video_dir: Path) -> list:
 # Also maintain a reverse map: zid -> filename for display
 def _zid_to_filename() -> Dict[int, str]:
     return {zid: name for name, zid in _video_name_to_zid.items()}
+
+
+def _record_person_count(zid: int, count: int):
+    """Record person count for a zone at current timestamp.
+    
+    Records on every call but throttles to prevent flooding:
+    - Always record if count changed from last value
+    - Record at least every 10 seconds even if unchanged (smooth chart)
+    - Collapse consecutive identical values older than 10s
+    """
+    timestamp = time.time()
+    if zid not in _zone_person_history:
+        _zone_person_history[zid] = deque(maxlen=MAX_HISTORY_POINTS)
+    
+    history = _zone_person_history[zid]
+    if not history:
+        history.append((timestamp, count))
+        return
+    
+    last_ts, last_count = history[-1]
+    elapsed = timestamp - last_ts
+    
+    if count != last_count:
+        # Count changed: always record immediately
+        history.append((timestamp, count))
+    elif elapsed >= 10:
+        # Same count but 10s passed: record a fresh data point for smooth lines
+        history.append((timestamp, count))
+
+
+def _get_zone_display_name(zid: int) -> str:
+    """Get display name for zone (custom name or default)."""
+    if zid in _zone_custom_names:
+        return _zone_custom_names[zid]
+    return f"Zone {zid}"
+
+
+def _set_zone_name(zid: int, name: str) -> bool:
+    """Set custom name for a zone. Returns True if successful."""
+    if not name or not name.strip():
+        # Remove custom name if empty
+        _zone_custom_names.pop(zid, None)
+        return True
+    _zone_custom_names[zid] = name.strip()
+    return True
 
 
 ZONE_IDS = _find_zone_ids(
@@ -991,9 +1044,18 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
                     if did_infer:
                         frame, alerts, dets = _annotate(frame, zid)
                         now_det = time.time()
+                        # Always record person count (including 0) for accurate timeline
+                        person_count = len([d for d in dets if str(d.get('label', '')).lower() == 'person'])
+                        _record_person_count(zid, person_count)
                         if dets:
                             st.last_dets = dets
                             st.last_dets_ts = now_det
+                        elif st.last_dets:
+                            # No detections this frame: clear stale dets after hold period
+                            hold_time = now_det - (st.last_dets_ts or 0.0)
+                            if hold_time > COASTVISION_DET_HOLD_S * 2:
+                                st.last_dets = []
+                                st.last_dets_ts = now_det
                         if alerts:
                             _record_alerts(alerts)
                             _persist_alerts(zid, alerts, frame)
@@ -1185,6 +1247,7 @@ def zones():
         items.append(
             {
                 "id": zid,
+                "name": _get_zone_display_name(zid),
                 "filename": zid_names.get(zid, p.name),
                 "path": str(p),
                 "exists": bool(p.exists()),
@@ -1487,6 +1550,56 @@ def zone_detections(zid: int):
     age = (time.time() - st.last_dets_ts) if st.last_dets_ts else None
     items = st.last_dets or []
     return jsonify({"zone": zid, "count": len(items), "age_s": age, "items": items})
+
+
+@app.route("/api/zones/<int:zid>/timeline", methods=["GET"])
+def zone_timeline(zid: int):
+    """Get person count timeline data for a zone."""
+    if zid not in _zone_person_history:
+        return jsonify({"zone": zid, "timeline": []})
+    
+    history = list(_zone_person_history[zid])
+    # Convert to frontend-friendly format
+    timeline = [{"timestamp": ts, "count": count} for ts, count in history]
+    return jsonify({"zone": zid, "timeline": timeline})
+
+
+@app.route("/api/zones/<int:zid>/name", methods=["GET", "POST"])
+def zone_name(zid: int):
+    """Get or set custom name for a zone."""
+    if request.method == "GET":
+        return jsonify({
+            "zone": zid,
+            "name": _get_zone_display_name(zid),
+            "is_custom": zid in _zone_custom_names
+        })
+    
+    elif request.method == "POST":
+        data = request.get_json() or {}
+        new_name = data.get("name", "").strip()
+        
+        if _set_zone_name(zid, new_name):
+            return jsonify({
+                "success": True,
+                "zone": zid,
+                "name": _get_zone_display_name(zid),
+                "is_custom": zid in _zone_custom_names
+            })
+        else:
+            return jsonify({"success": False, "error": "Invalid name"}), 400
+
+
+@app.route("/api/analytics/timeline", methods=["GET"])
+def analytics_timeline():
+    """Get person count timeline data for all zones."""
+    data = {}
+    for zid in _zone_person_history:
+        history = list(_zone_person_history[zid])
+        data[str(zid)] = {
+            "name": _get_zone_display_name(zid),
+            "timeline": [{"timestamp": ts, "count": count} for ts, count in history]
+        }
+    return jsonify(data)
 
 
 @app.route("/api/alerts", methods=["GET"])
