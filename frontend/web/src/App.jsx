@@ -1446,7 +1446,7 @@ export default function App() {
       {/* Subtle top shimmer */}
       <Box sx={{ position: "fixed", top: 0, left: 0, right: 0, height: "300px", zIndex: 0, pointerEvents: "none", background: "radial-gradient(ellipse 80% 50% at 50% 0%, rgba(45,212,191,0.06) 0%, transparent 70%)" }} />
       {/* NAVBAR - Premium dark chrome header with gold accents */}
-      <AppBar position="sticky" elevation={0} sx={{ position: "relative", zIndex: 10, background: "linear-gradient(180deg, rgba(8,26,36,0.97) 0%, rgba(6,20,28,0.97) 100%)", backdropFilter: "blur(30px) saturate(200%)", WebkitBackdropFilter: "blur(30px) saturate(200%)", borderBottom: "none", borderRadius: { xs: 0, md: "16px" }, mx: { xs: 0, md: 2 }, mt: 1, boxShadow: "0 12px 50px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.05), inset 0 -1px 0 rgba(0,0,0,0.3)", border: "1px solid rgba(45,212,191,0.08)", "&::after": { content: '""', position: "absolute", bottom: 0, left: "5%", right: "5%", height: "1px", background: "linear-gradient(90deg, transparent, rgba(45,212,191,0.25), transparent)" } }}>
+      <AppBar position="fixed" elevation={0} sx={{ top: 0, left: 0, right: 0, zIndex: 1100, background: "linear-gradient(180deg, rgba(8,26,36,0.97) 0%, rgba(6,20,28,0.97) 100%)", backdropFilter: "blur(30px) saturate(200%)", WebkitBackdropFilter: "blur(30px) saturate(200%)", borderBottom: "none", borderRadius: { xs: 0, md: "0 0 16px 16px" }, boxShadow: "0 12px 50px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.05), inset 0 -1px 0 rgba(0,0,0,0.3)", border: "1px solid rgba(45,212,191,0.08)", "&::after": { content: '""', position: "absolute", bottom: 0, left: "5%", right: "5%", height: "1px", background: "linear-gradient(90deg, transparent, rgba(45,212,191,0.25), transparent)" } }}>
         <Toolbar sx={{ gap: 3, minHeight: 110, px: { xs: 2, md: 5 }, py: 2 }}>
           {/* Logo - Premium */}
           <Box sx={{ display: "flex", alignItems: "center", gap: 2.5 }}>
@@ -1617,7 +1617,7 @@ export default function App() {
       </AppBar>
 
       {/* CONTENT AREA */}
-      <Box sx={{ p: { xs: 2, md: 5 }, pt: { xs: 3, md: 5 }, maxWidth: 2000, mx: "auto", minHeight: "calc(100vh - 180px)", position: "relative", zIndex: 1 }}>
+      <Box sx={{ p: { xs: 2, md: 5 }, pt: { xs: "200px", md: "210px" }, maxWidth: 2000, mx: "auto", minHeight: "calc(100vh - 180px)", position: "relative", zIndex: 1 }}>
         {tab === 0 && (
           <Box>
             {/* Stats Row */}
