@@ -1,215 +1,293 @@
-# CoastVision: AI-Powered Beach Surveillance System
-( Currently In Progress )
+# CoastVision
 
-## Project Overview
-CoastVision detects people in water, flags possible drowning behavior, and surfaces alerts for lifeguards. A PyQt desktop dashboard shows six zones with zoomable popouts and alerts. Future work: Android app for lifeguard notifications.
+AI-powered coastal surveillance system for multi-zone beach monitoring, drowning-risk detection, and real-time alerting.
 
-## Objectives
-- Detect humans entering water zones from camera feeds.
-- Flag potential distress (immobility heuristic for now; extendable to richer behavior models).
-- Alert with zone context and maintain a rolling log.
-- Enable heatmap/analytics for risky areas (planned).
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Flask](https://img.shields.io/badge/Backend-Flask-black)
+![React](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-61dafb)
+![YOLO](https://img.shields.io/badge/Model-Ultralytics%20YOLO-111827)
+![Platform](https://img.shields.io/badge/Platform-Windows%20focused-2563eb)
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Current Capabilities](#current-capabilities)
+- [System Architecture](#system-architecture)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Quick Start](#quick-start)
+- [Run Modes](#run-modes)
+- [Configuration](#configuration)
+- [API Reference (Key Endpoints)](#api-reference-key-endpoints)
+- [Model Training and Evaluation](#model-training-and-evaluation)
+- [Latest Model Performance](#latest-model-performance)
+- [Documentation](#documentation)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Overview
+
+CoastVision is an end-to-end AI surveillance project built to support beach safety operations. The system ingests zone-wise video feeds, performs YOLO-based detection, serves annotated streams through a Flask backend, and displays live monitoring + analytics in a modern React dashboard.
+
+Primary goal: help lifeguards identify risky events quickly with visual context, timeline data, and operational alert workflows.
+
+## Current Capabilities
+
+- Multi-zone video ingestion and stable zone mapping.
+- Real-time object detection using custom trained model (`models/best.pt`).
+- Live stream access via frame snapshots, MJPEG, and HLS routes.
+- Dashboard with:
+  - live zone cards
+  - fullscreen zone monitoring
+  - analytics charts
+  - event logs and alerts
+  - video management (upload, rename, delete)
+- Lifeguard workflow APIs:
+  - registration
+  - zone assignment
+  - alert fetch and response
+  - heartbeat and stream channels
+- Validation pipeline for reporting and viva-ready performance summaries.
+
+## System Architecture
+
+```text
+Video Files / Feeds
+        |
+        v
+Flask Backend (backend/server.py)
+  - Zone manager
+  - YOLO inference
+  - Alert generation
+  - Analytics + timelines
+  - MJPEG/HLS/frame APIs
+        |
+        v
+React Dashboard (frontend/web)
+  - Live monitoring UI
+  - Analytics and logs
+  - Lifeguard/admin actions
+```
 
 ## Tech Stack
-- Python, PyTorch, Ultralytics YOLOv8/YOLOv5, OpenCV
-- PyQt dashboard (current), Flask/Streamlit legacy prototype
-- Roboflow / LabelImg for annotation
-- Training on Colab or local GPU (RTX-class recommended)
 
-## Getting Started
-```bash
-git clone https://github.com/yourusername/coastvision.git
+| Layer | Technologies |
+|------|--------------|
+| Backend | Python, Flask, Waitress, Flask-CORS, OpenCV |
+| AI/ML | PyTorch, Ultralytics YOLO, NumPy |
+| Frontend | React, Vite, MUI, Chart.js, HLS.js |
+| Data | CSV logs, YOLO dataset YAML, image/video assets |
+| Tooling | PowerShell scripts, pip, npm |
+
+## Project Structure
+
+```text
+COASTVISION/
+├── backend/                  # Flask backend + detection pipeline
+├── frontend/
+│   ├── web/                  # Main React dashboard (current UI)
+│   ├── dashboard/            # Legacy PyQt dashboard assets
+│   └── legacy_te_proj/       # Archived legacy prototype
+├── scripts/                  # Train/infer/evaluate helper scripts
+├── models/                   # Trained model weights (best.pt)
+├── dataset/                  # YOLO train/valid/test + data.yaml
+├── data/                     # Alerts, logs, runtime media
+├── docs/                     # Guides, plans, integration notes
+├── run_backend.ps1           # Backend launcher (foreground/background)
+└── run_frontend.ps1          # Frontend launcher
+```
+
+## Quick Start
+
+### 1) Clone the repository
+
+```powershell
+git clone https://github.com/Harshal-Bsys27/COASTVISION.git
+cd COASTVISION
+```
+
+### 2) Create virtual environment
+
+> Note: `run_backend.ps1` currently expects the environment folder name to be `venv`.
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+```
+
+### 3) Install Python dependencies
+
+```powershell
 pip install -r requirements.txt
 ```
 
-## Training (YOLOv8)
-- Local: run `scripts/train_yolov8.py`; copy the resulting `best.pt` into `models/` (root) and into `frontend/dashboard/models/` for the UI.
-- Colab: follow [docs/colab_training_full_example.md](docs/colab_training_full_example.md) (short guides: [docs/colab_training.md](docs/colab_training.md), [docs/colab_training_with_auto_backup.md](docs/colab_training_with_auto_backup.md)).
-
-## Local Training (YOLOv8 Drowning Detection)
-
-1. Activate your virtual environment:
-    ```powershell
-    & "c:\Users\HARSHAL BARHATE\OneDrive\Desktop\COASTVISION\venv\Scripts\Activate.ps1"
-    ```
-
-2. Install dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-3. Run the training script:
-    ```bash
-    python scripts/train_yolov8.py
-    ```
-
-4. After training completes, copy the trained model:
-    ```bash
-    copy runs\detect\trainX\weights\best.pt models\best.pt
-    ```
-
-5. Use `models/best.pt` for inference or dashboard integration.
-
-## Dashboard (PyQt, GPU-aware)
-```powershell
-# activate venv if you use one
-& "c:\Users\HARSHAL BARHATE\OneDrive\Desktop\COASTVISION\venv\Scripts\Activate.ps1"
-cd "c:\Users\HARSHAL BARHATE\OneDrive\Desktop\COASTVISION\frontend"
-pip install -r requirements.txt
-python dashboard\main_dashboard.py
-```
-- Videos: place `zone1.mp4` … `zone6.mp4` in `frontend/dashboard/videos/`.
-- Model: auto-loads `frontend/dashboard/models/best.pt`, else `yolov8n.pt`.
-- GPU: use a CUDA Torch build (e.g., torch 2.2.2+cu121); console will show `Model running on: CUDA`.
-
-## GPU setup (RTX 3050 6GB, Windows) — do this exactly
-
-### 0) NVIDIA driver check (required)
-1. Install latest NVIDIA driver (Game Ready / Studio), reboot.
-2. Verify driver works:
-   ```powershell
-   nvidia-smi
-   ```
-   If this fails, CUDA PyTorch will not work (fix driver first).
-
-### 1) Activate the SAME Python/venv used by the backend
-```powershell
-cd "c:\Users\HARSHAL BARHATE\OneDrive\Desktop\COASTVISION"
-& ".\venv\Scripts\Activate.ps1"
-where python
-python -m pip --version
-```
-
-### 2) Install project deps, then install CUDA PyTorch (important order)
-If your `requirements.txt` installs torch (CPU), it can overwrite CUDA torch. So do:
+### 4) Start backend
 
 ```powershell
-# Install everything else first
-python -m pip install -r requirements.txt
-
-# Then force CUDA torch install in THIS SAME venv
-python -m pip uninstall -y torch torchvision torchaudio
-python -m pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
+.\run_backend.ps1
 ```
 
-### 3) Verify CUDA PyTorch is actually working
-```powershell
-python -c "import torch; print('torch=', torch.__version__); print('cuda_available=', torch.cuda.is_available()); print('cuda_ver=', torch.version.cuda); print('gpu=', torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)"
-```
-Expected:
-- `cuda_available= True`
-- `gpu= NVIDIA GeForce RTX 3050 ...`
-
-### 4) Run backend and FAIL FAST if it falls back to CPU
-```powershell
-$env:COASTVISION_DEVICE="cuda:0"
-$env:COASTVISION_REQUIRE_CUDA="1"
-
-# perf
-$env:COASTVISION_HALF="1"
-$env:COASTVISION_TF32="1"
-$env:COASTVISION_CUDNN_BENCHMARK="1"
-
-# smooth multi-zone defaults
-$env:COASTVISION_MAX_SIDE="1280"
-$env:COASTVISION_FPS="10"
-$env:COASTVISION_INFER_EVERY="2"
-$env:COASTVISION_IMGSZ="640"
-
-python backend\server.py
-```
-
-### 5) Confirm from the API
-Open:
-- http://127.0.0.1:8000/api/health
-
-Must show:
-- `requested_device = "cuda:0"`
-- `device = "cuda:0"`
-- `torch_cuda_available = true`
-- `cuda_smoke_ok = true`
-
-If `cuda_smoke_ok=false`, read `cuda_smoke_error` — it tells you exactly what’s wrong.
-
-## Performance (RTX 3050 6GB recommended settings)
-If you use 4K videos (zone1/zone2), run backend with:
+### 5) Start frontend (new terminal)
 
 ```powershell
-$env:COASTVISION_MAX_SIDE="1280"
-$env:COASTVISION_FPS="10"
-$env:COASTVISION_INFER_EVERY="2"
-$env:COASTVISION_IMGSZ="640"
-$env:COASTVISION_HALF="1"
-python backend\server.py
+.\run_frontend.ps1
 ```
 
-Notes:
-- Backend serializes GPU inference across zones for stability.
-- Frontend uses MJPEG streaming; if a stream fails, it auto-falls back to `frame.jpg` polling.
+### 6) Open the app
 
-## If backend still runs on CPU (most common causes)
-### 1) You installed CUDA torch into a different Python than the backend uses
-Run these in the SAME terminal before starting the backend:
+- Frontend: http://localhost:5173
+- Backend health: http://127.0.0.1:8000/api/health
+
+## Run Modes
+
+### Backend foreground mode
 
 ```powershell
-# verify which python/pip you are using
-where python
-python -m pip --version
-python -c "import torch; print('torch=', torch.__version__); print('cuda_available=', torch.cuda.is_available()); print('cuda_ver=', torch.version.cuda)"
+.\run_backend.ps1
 ```
 
-If `cuda_available` is False, install CUDA torch in this exact environment:
+### Backend background mode
 
 ```powershell
-python -m pip uninstall -y torch torchvision torchaudio
-python -m pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
+.\run_backend.ps1 -Detach
 ```
 
-### 2) Force CUDA and fail fast (recommended for debugging)
-```powershell
-$env:COASTVISION_DEVICE="cuda:0"
-$env:COASTVISION_REQUIRE_CUDA="1"
-python backend\server.py
-```
-
-Then check:
-- http://127.0.0.1:8000/api/health
-- Look at: `device`, `torch_cuda_available`, `cuda_smoke_ok`, `cuda_smoke_error`
-
-## Important: venv name must match what you actually run
-If you activate `.venv` but earlier installed CUDA torch in `venv` (or vice-versa), the backend will run CPU.
-
-Use whichever exists on your machine:
+### Stop background backend
 
 ```powershell
-# Option A
-& ".\venv\Scripts\Activate.ps1"
-
-# Option B
-& ".\.venv\Scripts\Activate.ps1"
+.\run_backend.ps1 -Stop
 ```
 
-Then verify this exact python has CUDA torch:
+## Configuration
+
+Environment variables commonly used for performance/device control:
+
+| Variable | Purpose | Example |
+|---------|---------|---------|
+| `COASTVISION_DEVICE` | Force inference device | `cuda:0` |
+| `COASTVISION_REQUIRE_CUDA` | Fail startup if CUDA is unavailable | `1` |
+| `COASTVISION_HALF` | FP16 inference on supported GPU | `1` |
+| `COASTVISION_TF32` | Enable TF32 on NVIDIA Ampere+ | `1` |
+| `COASTVISION_CUDNN_BENCHMARK` | cuDNN autotune for speed | `1` |
+| `COASTVISION_VIDEO_DIR` | Override video source directory | `C:\path\to\videos` |
+| `COASTVISION_MAX_SIDE` | Resize guard for large frames | `960` or `1280` |
+| `COASTVISION_IMGSZ` | YOLO inference size | `640` |
+| `COASTVISION_FPS` | Processing frame rate cap | `12` |
+| `COASTVISION_INFER_EVERY` | Infer every Nth frame | `2` |
+
+Frontend API URL (optional):
+
+- Set `VITE_API_URL` in frontend environment to point to custom backend host.
+- If not set, frontend defaults to `http://127.0.0.1:8000`.
+
+## API Reference (Key Endpoints)
+
+### Core
+
+- `GET /api/health`
+- `GET /api/zones`
+- `POST /api/zones/reload`
+- `GET /api/analysis`
+- `GET /api/alerts`
+
+### Zone Streams and Detection
+
+- `GET /api/zones/<zid>/frame.jpg`
+- `GET /api/zones/<zid>/stream.mjpg`
+- `GET /api/zones/<zid>/hls/stream.m3u8`
+- `GET /api/zones/<zid>/detections`
+- `GET /api/zones/<zid>/timeline`
+- `GET|POST /api/zones/<zid>/name`
+
+### Video Management
+
+- `GET /api/videos`
+- `POST /api/videos/upload`
+- `DELETE /api/videos/<filename>`
+- `POST /api/videos/<filename>/rename`
+
+### Lifeguard Operations
+
+- `POST /api/lifeguards/register`
+- `GET /api/lifeguards`
+- `GET /api/lifeguards/<lg_id>`
+- `POST /api/lifeguards/<lg_id>/assign`
+- `GET /api/lifeguards/<lg_id>/alerts`
+- `POST /api/lifeguards/<lg_id>/respond`
+- `POST /api/lifeguards/<lg_id>/heartbeat`
+- `GET /api/lifeguards/<lg_id>/stream`
+- `POST /api/admin/broadcast`
+
+## Model Training and Evaluation
+
+### Train
+
 ```powershell
-where python
-python -c "import torch; print('torch=',torch.__version__); print('torch_built_with_cuda=', torch.version.cuda is not None); print('cuda_available=', torch.cuda.is_available()); print('cuda_ver=', torch.version.cuda)"
+python scripts/train_yolov8.py
 ```
 
-Expected:
-- `torch_built_with_cuda = True`
-- `cuda_available = True`
+### Evaluate
 
-If `torch_built_with_cuda=False`, you installed CPU-only torch in that environment.
+```powershell
+python scripts/evaluate_model.py --model models/best.pt --data dataset/data.yaml --device 0 --imgsz 640 --save-json
+```
 
-## Folder Structure
-- `/backend` — backend API/streaming (if used)
-- `/frontend` — PyQt dashboard (`dashboard/`), legacy prototype (`legacy_te_proj/`)
-- `/models` — trained weights storage
-- `/data` and `/dataset` — raw/annotated data (not tracked in git)
-- `/docs` — guides (Colab training, project notes)
-- `/scripts` — training/inference utilities
+Evaluation summary file:
+
+- `scripts/evaluation_results.md`
+
+## Latest Model Performance
+
+Validation dataset:
+
+- Images: 1478
+- Instances: 2748
+
+Overall metrics:
+
+- Precision: 0.83
+- Recall: 0.819
+- mAP50: 0.865
+- mAP50-95: 0.53
+
+Per-class mAP50:
+
+- Drowning: 0.905
+- Person out of water: 0.852
+- Swimming: 0.837
+
+Presentation one-liner:
+
+> Our custom YOLOv8 model achieves **86.5% mAP50** and **53% mAP50-95** on the validation set, with best class performance on drowning detection (**90.5% mAP50**).
+
+## Documentation
+
+- `COASTVISION_MASTER_GUIDE.md`
+- `docs/project_plan.md`
+- `docs/dashboard_integration.md`
+- `docs/colab_training.md`
+- `docs/colab_training_full_example.md`
+- `docs/colab_training_with_auto_backup.md`
+
+## Roadmap
+
+- Improve event-level drowning behavior modeling beyond single-frame detection.
+- Add richer incident triage and priority scoring.
+- Add deployment packaging for production setup.
+- Strengthen test coverage for backend and dashboard API integration.
+
+## Contributing
+
+Contributions are welcome. If you want to contribute:
+
+1. Fork the repository.
+2. Create a feature branch.
+3. Commit your changes.
+4. Open a pull request with clear description and test notes.
 
 ## License
-MIT License (add LICENSE file as needed)
 
+This project is intended for academic and research use unless otherwise specified.
 
+If you want permissive open-source distribution, add an MIT `LICENSE` file at project root.
