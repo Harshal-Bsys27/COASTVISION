@@ -1,4 +1,20 @@
-# Frontend - PyQt Dashboard
+# Frontend Notes (Legacy + Current)
+
+## Important
+
+The active production UI is the React dashboard in:
+
+- `frontend/web`
+
+This file mainly documents the older PyQt prototype under `frontend/dashboard` and `frontend/legacy_te_proj`.
+
+For current presentation/system behavior, refer to:
+
+- `docs/presentation_system_guide.md`
+
+---
+
+# Frontend - PyQt Dashboard (Legacy)
 
 PyQt-based 6-zone monitor that plays prototype videos and highlights people (YOLO) with a simple immobility check for possible drowning. Zoomable per-zone popup (mouse/touchpad), pause/play, and alert log.
 
