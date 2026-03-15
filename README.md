@@ -36,13 +36,17 @@ Primary goal: help lifeguards identify risky events quickly with visual context,
 
 - Multi-zone video ingestion and stable zone mapping.
 - Real-time object detection using custom trained model (`models/best.pt`).
-- Live stream access via frame snapshots, MJPEG, and HLS routes.
+- Live stream access with HLS-first playback and MJPEG/frame fallbacks for reliability.
 - Dashboard with:
   - live zone cards
   - fullscreen zone monitoring
   - analytics charts
   - event logs and alerts
   - video management (upload, rename, delete)
+- Dedicated Lifeguards tab with Telegram controls:
+  - register/test/remove chat IDs
+  - stop/resume notifications without losing registration
+  - zone-specific routing (`lifeguard_<zoneId>` -> Zone `<zoneId>` alerts)
 - Lifeguard workflow APIs:
   - registration
   - zone assignment
@@ -219,6 +223,16 @@ Frontend API URL (optional):
 - `GET /api/lifeguards/<lg_id>/stream`
 - `POST /api/admin/broadcast`
 
+### Telegram Notifications
+
+- `GET /api/telegram/status`
+- `POST /api/telegram/register`
+- `POST /api/telegram/unregister/<lg_id>`
+- `GET /api/telegram/<lg_id>`
+- `POST /api/telegram/<lg_id>/test`
+- `POST /api/telegram/<lg_id>/pause`
+- `POST /api/telegram/<lg_id>/resume`
+
 ## Model Training and Evaluation
 
 ### Train
@@ -264,6 +278,7 @@ Presentation one-liner:
 ## Documentation
 
 - `COASTVISION_MASTER_GUIDE.md`
+- `docs/presentation_system_guide.md` (presentation/viva-ready system explanation)
 - `docs/project_plan.md`
 - `docs/dashboard_integration.md`
 - `docs/colab_training.md`
