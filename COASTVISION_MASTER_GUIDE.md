@@ -3,6 +3,20 @@
 > **Complete reference booklet for the CoastVision AI Beach Surveillance System**
 > Last updated: March 2026 | Author: Harshal Barhate
 
+## 0. Current Build Snapshot (March 2026)
+
+This guide contains historical implementation details. For presentation-ready, current behavior, also see:
+
+- `docs/presentation_system_guide.md`
+
+Latest functional updates in the current build:
+
+- Dedicated **Lifeguards** tab in React dashboard for Telegram operations.
+- Telegram controls now include **Add / Test / Stop / Resume / Remove**.
+- Zone-specific routing is enforced by lifeguard ID pattern (`lifeguard_<zoneId>`).
+- Telegram registrations and pause state are persisted in `data/telegram_users.json`.
+- Streaming is **HLS-first**, with automatic fallback to MJPEG and frame polling.
+
 ---
 
 ## Table of Contents
