@@ -6,6 +6,19 @@
 > **Repository:** [Harshal-Bsys27/COASTVISION](https://github.com/Harshal-Bsys27/COASTVISION)
 > **Detailed Technical Reference:** See `COASTVISION_MASTER_GUIDE.md` for API docs, config, troubleshooting, and the full changelog.
 
+## Current Build Snapshot (March 2026)
+
+This document includes historical planning context. The current implementation now includes:
+
+- Dedicated Lifeguards tab in the React dashboard
+- Telegram-based lifeguard notifications with zone-specific routing
+- Add, Test, Stop, Resume, and Remove controls per lifeguard
+- HLS-first streaming with automatic fallback to MJPEG and frame polling
+
+For the most presentation-ready, up-to-date explanation, see:
+
+- `docs/presentation_system_guide.md`
+
 ---
 
 ## Table of Contents
@@ -55,15 +68,15 @@ We break this into four layers:
 
 3. **Frontend Dashboard** — A React web application displays live video feeds from all camera zones in a grid, shows real-time analytics with charts, and provides voice alerts when an emergency is detected.
 
-4. **Safety Layer** — When the model detects drowning with high confidence, the system triggers voice announcements in the browser, logs alerts to CSV, saves snapshot images, and pushes real-time notifications to lifeguard devices via SSE (Server-Sent Events).
+4. **Safety Layer** — When the model detects drowning with high confidence, the system triggers voice announcements in the browser, logs alerts to CSV, saves snapshot images, and pushes zone-specific notifications to lifeguards via Telegram.
 
 ```
 [Camera Videos] → [YOLO on GPU] → [Annotated Frames + Alerts]
                                           ↓
                      ┌────────────────────┼────────────────────┐
                      ↓                    ↓                    ↓
-              Voice Alert          Dashboard View         Lifeguard Push
-           (Browser Speech)      (React + Charts)        (Mobile SSE)
+              Voice Alert          Dashboard View      Lifeguard Telegram
+           (Browser Speech)      (React + Charts)      (Zone-specific push)
 ```
 
 ---
@@ -77,7 +90,7 @@ We break this into four layers:
 │   React + MUI + Chart.js + hls.js      │
 │   Tabs: Monitoring | Analytics |       │
 │         Event Logs | Settings |        │
-│         Video Manager                  │
+│         Lifeguards | Video Manager     │
 └──────────────┬─────────────────────────┘
                │  HTTP REST API (polling)
                │  HLS / MJPEG streams
@@ -90,7 +103,7 @@ We break this into four layers:
 │   • HLS encoding via FFmpeg            │
 │   • Alert engine + CSV logging         │
 │   • Person count tracking (per zone)   │
-│   • Lifeguard management (SSE push)    │
+│   • Lifeguard management + Telegram    │
 └──────────────┬─────────────────────────┘
                │
       ┌────────▼────────┐
@@ -220,7 +233,7 @@ When the YOLO model detects drowning (confidence ≥ 0.55), multiple safety laye
 
 4. **CSV Logging** — Alert details (timestamp, zone, label, confidence, bounding box) are appended to `data/alerts/alerts.csv`. A snapshot image of the moment is saved to `data/alerts/images/`.
 
-5. **Lifeguard Push** — Registered lifeguards receive the alert in real-time via SSE (Server-Sent Events). Lifeguards use a PWA page (`lifeguard.html`) on their phones to view alerts and tap "Respond" to acknowledge.
+5. **Lifeguard Push** — Registered lifeguards receive zone-specific alerts on Telegram. Each lifeguard mapping uses `lifeguard_<zoneId>` and supports Test, Stop, Resume, and Remove controls from the Lifeguards tab.
 
 ---
 
@@ -309,7 +322,7 @@ This means the system can scale from 1 camera to as many as the GPU can handle, 
 | **HLS Streaming** | Smooth, hardware-decoded video via H.264 encoding + hls.js |
 | **MJPEG/Polling Fallback** | Automatic downgrade if HLS unavailable |
 | **Voice Alerts** | Browser speaks drowning alerts via Web Speech API |
-| **Lifeguard Push** | Real-time SSE notifications to lifeguard mobile PWA |
+| **Lifeguard Telegram Alerts** | Zone-specific Telegram notifications with Add/Test/Stop/Resume/Remove controls |
 | **Person Count Timeline** | Chart.js line graphs showing people count per zone over 24 hours |
 | **Analytics Dashboard** | 4 sub-sections: Overview, Person Count, Detections, Live Feed |
 | **Custom Zone Names** | Rename zones inline from the dashboard |
@@ -328,7 +341,7 @@ This means the system can scale from 1 camera to as many as the GPU can handle, 
 | **AI/ML** | YOLOv8 (Ultralytics), PyTorch, CUDA 12.x, RTX 3050 |
 | **Backend** | Python, Flask, OpenCV, FFmpeg, NumPy |
 | **Frontend** | React, Material-UI (MUI), Vite, Chart.js, hls.js |
-| **Alerts** | Web Speech API, AudioContext, SSE (Server-Sent Events) |
+| **Alerts** | Web Speech API, AudioContext, Telegram Bot API |
 | **Data** | Roboflow (annotation), YOLO format labels, CSV logging |
 | **Hosting** | Local machine (localhost:8000 backend, localhost:5173 frontend) |
 
