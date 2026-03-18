@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -18,12 +19,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Load environment variables from .env file
+env_file = Path(__file__).parent.parent / ".env"
+if env_file.exists():
+    try:
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        os.environ[key.strip()] = value.strip()
+    except Exception as e:
+        pass  # Silently ignore .env loading errors
+
 import cv2
 import numpy as np
 import torch
 from flask import Flask, Response, abort, jsonify, request
 from flask_cors import CORS
 from ultralytics import YOLO
+
+# Import Telegram notification system
+from telegram_notify import notifier
 
 # --- NEW: GPU perf toggles (safe for RTX 3050) ---
 COASTVISION_TF32 = os.environ.get("COASTVISION_TF32", "1").strip().lower() not in {"0", "false", "no"}
@@ -198,6 +216,8 @@ def _record_person_count(zid: int, count: int):
     history = _zone_person_history[zid]
     if not history:
         history.append((timestamp, count))
+        # Check crowd density
+        _check_crowd_density(zid, count)
         return
     
     last_ts, last_count = history[-1]
@@ -206,9 +226,103 @@ def _record_person_count(zid: int, count: int):
     if count != last_count:
         # Count changed: always record immediately
         history.append((timestamp, count))
+        # Check crowd density
+        _check_crowd_density(zid, count)
     elif elapsed >= 10:
         # Same count but 10s passed: record a fresh data point for smooth lines
         history.append((timestamp, count))
+        # Check crowd density periodically
+        _check_crowd_density(zid, count)
+
+
+def _check_crowd_density(zid: int, person_count: int):
+    """Check if zone exceeds crowd density threshold and generate alert if needed."""
+    threshold = CROWD_THRESHOLDS.get(zid, 50)
+    now = time.time()
+    
+    # Update crowd status
+    with _crowd_lock:
+        CROWD_STATUS[zid] = {
+            "count": person_count,
+            "threshold": threshold,
+            "status": "crowded" if person_count > threshold else "normal",
+            "last_check": now,
+            "exceeded": person_count > threshold
+        }
+        
+        # Check if we should trigger a crowding alert
+        if person_count > threshold:
+            # Check cooldown to avoid spam
+            last_alert_time = CROWD_ALERT_LAST_TIME.get(zid, 0)
+            if now - last_alert_time >= CROWD_ALERT_COOLDOWN:
+                # Generate crowd alert
+                severity = "low" if person_count <= threshold * 1.2 else "medium" if person_count <= threshold * 1.5 else "high"
+                alert = {
+                    "zone": zid,
+                    "person_count": person_count,
+                    "threshold": threshold,
+                    "severity": severity,
+                    "timestamp": now,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "label": "Crowd Density"
+                }
+                
+                CROWD_ALERT_HISTORY.appendleft(alert)
+                CROWD_ALERT_LAST_TIME[zid] = now
+                
+                # Log to CSV
+                try:
+                    with open(CROWD_ALERTS_CSV_PATH, "a", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            datetime.now(timezone.utc).isoformat(),
+                            zid,
+                            person_count,
+                            threshold,
+                            severity
+                        ])
+                except Exception as e:
+                    print(f"[crowd] Error logging crowd alert: {e}")
+                
+                print(f"[crowd] Zone {zid} CROWDING ALERT! {person_count} people (threshold: {threshold}, severity: {severity})")
+
+                # Send Telegram crowd alert only to lifeguards mapped to this
+                # zone (lifeguard_<zoneId>), and keep the wording consistent
+                # with drowning/emergency alerts ("Zone X"), to avoid random
+                # location names like "South Beach" showing up on unrelated
+                # lifeguards.
+                try:
+                    zone_name = f"Zone {zid}"
+                    users = getattr(notifier, "users", {}) or {}
+                    for tg_lg_id in list(users.keys()):
+                        target_zone = None
+                        if isinstance(tg_lg_id, str) and tg_lg_id.startswith("lifeguard_"):
+                            try:
+                                target_zone = int(tg_lg_id.split("_", 1)[1])
+                            except Exception:
+                                target_zone = None
+
+                        if target_zone is not None and target_zone == zid:
+                            # Treat crowd density like a special detection type
+                            # so the message stays compact, eg:
+                            # "⚠️ Crowd density detected in Zone 4 (150.0%)".
+                            try:
+                                # Map person_count vs threshold into a % style
+                                # "confidence" for the existing send_alert API.
+                                if threshold > 0:
+                                    crowd_ratio = min(1.5, person_count / float(threshold))
+                                    crowd_percent = crowd_ratio * 100.0
+                                else:
+                                    crowd_percent = 100.0
+                            except Exception:
+                                crowd_percent = 100.0
+
+                            try:
+                                notifier.send_alert(tg_lg_id, zone_name, "Crowd density", crowd_percent)
+                            except Exception as e:
+                                print(f"[telegram] Error sending crowd alert to {tg_lg_id}: {e}")
+                except Exception as e:
+                    print(f"[telegram] Crowd routing error: {e}")
 
 
 def _get_zone_display_name(zid: int) -> str:
@@ -278,6 +392,89 @@ ALERTS_IMAGES_DIR = (ALERTS_DIR / "images").resolve()
 ALERTS_CSV_PATH = (ALERTS_DIR / "alerts.csv").resolve()
 _alerts_lock = threading.Lock()
 
+# Response time tracking
+RESPONSE_TIMES_CSV_PATH = (ALERTS_DIR / "response_times.csv").resolve()
+_response_lock = threading.Lock()
+
+# Create response times CSV headers if it doesn't exist
+def _init_response_times_csv():
+    if not RESPONSE_TIMES_CSV_PATH.exists():
+        try:
+            with open(RESPONSE_TIMES_CSV_PATH, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["timestamp", "zone", "lifeguard_id", "lifeguard_name", "response_time_seconds", "alert_sent_at", "responded_at"])
+        except Exception as e:
+            print(f"[response] Error creating response times CSV: {e}")
+
+# Call on startup
+_init_response_times_csv()
+
+# In-memory tracking of sent alerts with timestamps (for response time calculation)
+ALERT_SENT_TIMES: Dict[str, float] = {}  # alert_id -> timestamp when sent to lifeguards
+
+# ===================== CROWD DENSITY MANAGEMENT =====================
+CROWD_THRESHOLDS_FILE = (ALERTS_DIR / "crowd_thresholds.json").resolve()
+CROWD_ALERTS_CSV_PATH = (ALERTS_DIR / "crowd_alerts.csv").resolve()
+
+# Default crowd thresholds (people per zone)
+CROWD_THRESHOLDS: Dict[int, int] = {}  # zone_id -> threshold person count
+
+# Track last crowd alert time per zone (to avoid spam)
+CROWD_ALERT_LAST_TIME: Dict[int, float] = {}  # zone_id -> last alert timestamp
+CROWD_ALERT_COOLDOWN = 60  # Minimum seconds between crowd alerts for same zone
+
+# Load/save crowd thresholds
+def _load_crowd_thresholds():
+    """Load crowd thresholds from file."""
+    global CROWD_THRESHOLDS
+    if CROWD_THRESHOLDS_FILE.exists():
+        try:
+            with open(CROWD_THRESHOLDS_FILE, "r") as f:
+                CROWD_THRESHOLDS = json.load(f)
+            print(f"[crowd] Loaded thresholds: {CROWD_THRESHOLDS}")
+        except Exception as e:
+            print(f"[crowd] Error loading thresholds: {e}")
+            CROWD_THRESHOLDS = {}
+
+def _save_crowd_thresholds():
+    """Persist crowd thresholds to file."""
+    try:
+        ALERTS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(CROWD_THRESHOLDS_FILE, "w") as f:
+            json.dump(CROWD_THRESHOLDS, f, indent=2)
+    except Exception as e:
+        print(f"[crowd] Error saving thresholds: {e}")
+
+def _init_crowd_thresholds():
+    """Initialize crowd thresholds with defaults if needed."""
+    global CROWD_THRESHOLDS
+    _load_crowd_thresholds()
+    # Ensure all zones have thresholds
+    for zid in ZONE_IDS:
+        if zid not in CROWD_THRESHOLDS:
+            CROWD_THRESHOLDS[zid] = 50  # Default threshold: 50 people
+    _save_crowd_thresholds()
+
+# Create crowd alerts CSV headers if not exists
+def _init_crowd_alerts_csv():
+    if not CROWD_ALERTS_CSV_PATH.exists():
+        try:
+            with open(CROWD_ALERTS_CSV_PATH, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["timestamp", "zone", "person_count", "threshold", "severity"])
+        except Exception as e:
+            print(f"[crowd] Error creating crowd alerts CSV: {e}")
+
+_init_crowd_alerts_csv()
+_init_crowd_thresholds()
+
+# Crowd alert history in memory (for dashboard)
+CROWD_ALERT_HISTORY = deque(maxlen=200)  # Store recent crowd alerts
+
+# Current crowd status per zone
+CROWD_STATUS: Dict[int, Dict[str, Any]] = {}  # zone_id -> {count, threshold, status, last_check}
+_crowd_lock = threading.Lock()
+
 # ----------------- LIFEGUARD MANAGEMENT -----------------
 import json
 import uuid
@@ -319,6 +516,15 @@ _load_lifeguards()
 def _broadcast_alert_to_lifeguards(alert: dict):
     """Send alert to all lifeguards assigned to the zone."""
     zone = alert.get("zone")
+    
+    # Create unique alert ID if not present
+    if "alert_id" not in alert:
+        alert["alert_id"] = f"{zone}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    
+    # Track when alert is sent (for response time calculation)
+    alert_id = alert["alert_id"]
+    ALERT_SENT_TIMES[alert_id] = time.time()
+    
     with _lifeguard_lock:
         for lg_id, lg in LIFEGUARDS.items():
             # Send to lifeguards assigned to this zone OR all zones (empty list = all)
@@ -334,6 +540,32 @@ def _broadcast_alert_to_lifeguards(alert: dict):
                         LIFEGUARD_SSE_QUEUES[lg_id].put_nowait(alert)
                     except:
                         pass
+
+    # Telegram routing: use registered Telegram users whose IDs follow the
+    # pattern "lifeguard_<zoneId>" so that each lifeguard only receives
+    # alerts for their own zone.
+    try:
+        detection_type = alert.get("label", alert.get("class", "Detection"))
+        confidence = alert.get("conf", 0)
+        zone_name = f"Zone {zone}" if isinstance(zone, int) else str(zone)
+
+        users = getattr(notifier, "users", {}) or {}
+        for tg_lg_id in list(users.keys()):
+            target_zone = None
+            if isinstance(tg_lg_id, str) and tg_lg_id.startswith("lifeguard_"):
+                try:
+                    target_zone = int(tg_lg_id.split("_", 1)[1])
+                except Exception:
+                    target_zone = None
+
+            # Only send if this lifeguard is mapped to the alert's zone
+            if target_zone is not None and target_zone == zone:
+                try:
+                    notifier.send_alert(tg_lg_id, zone_name, detection_type, confidence)
+                except Exception as e:
+                    print(f"[telegram] Error sending alert to {tg_lg_id}: {e}")
+    except Exception as e:
+        print(f"[telegram] Routing error: {e}")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -1366,73 +1598,22 @@ def delete_video(filename: str):
     ZONE_IDS = _find_zone_ids(VIDEO_DIR)
     return jsonify({"ok": True, "deleted": safe_name, "zones": [z for z in ZONE_IDS]})
 
-
-@app.route("/api/videos/<filename>/rename", methods=["POST"])
-def rename_video(filename: str):
-    """Rename a video file."""
-    data = request.get_json() or {}
-    new_name = data.get("new_name", "").strip()
-    if not new_name:
-        return jsonify({"error": "new_name is required"}), 400
-
-    safe_old = Path(filename).name
-    safe_new = Path(new_name).name
-
-    ext = Path(safe_new).suffix.lower()
-    if ext not in _VIDEO_EXTENSIONS:
-        return jsonify({"error": f"Unsupported extension '{ext}'"}), 400
-
-    old_path = VIDEO_DIR / safe_old
-    new_path = VIDEO_DIR / safe_new
-
-    if not old_path.exists():
-        return jsonify({"error": f"File '{safe_old}' not found"}), 404
-    if new_path.exists() and safe_old != safe_new:
-        return jsonify({"error": f"File '{safe_new}' already exists"}), 409
-
-    # Stop old zone
-    name_map = _zid_to_filename()
-    zid_for_name = {v: k for k, v in name_map.items()}
-    zid = zid_for_name.get(safe_old)
-    if zid:
-        zs = _zones.pop(zid, None)
-        if zs:
-            _stop_hls_encoder(zs)
-            if zs.cap:
-                try:
-                    zs.cap.release()
-                except Exception:
-                    pass
-        VIDEO_PATHS.pop(zid, None)
-        _zone_threads.pop(zid, None)
-        _video_name_to_zid.pop(safe_old, None)
-
-    try:
-        old_path.rename(new_path)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-    # Re-scan and restart
-    _open_zone_caps()
-    for z in list(_zones.keys()):
-        _ensure_zone_thread(z)
-
-    return jsonify({"ok": True, "old_name": safe_old, "new_name": safe_new, "zones": [z for z in ZONE_IDS]})
-
-
 @app.route("/api/zones/<int:zid>/frame.jpg", methods=["GET"])
 def zone_frame(zid: int):
     st = _zones.get(zid)
     if not st:
         jpg = _placeholder_jpeg(f"Zone {zid} unavailable", "Video file missing or cannot open")
         return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
     if st.last_jpeg is None:
         jpg = _placeholder_jpeg(f"Zone {zid}", "Loading frames...")
         return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
     w = request.args.get("w", "").strip()
     if w:
         jpg = st.last_jpeg_grid or st.last_jpeg
         return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
     return Response(st.last_jpeg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
@@ -1634,6 +1815,221 @@ def analysis():
     )
 
 
+@app.route("/api/analytics/response-times", methods=["GET"])
+def response_times_analytics():
+    """Get lifeguard response time metrics."""
+    limit = int(request.args.get("limit", "100"))
+    zone_filter = request.args.get("zone", "").strip()
+    
+    response_times = []
+    recent_responses = []
+    by_zone = {}
+    by_lifeguard = {}
+    
+    try:
+        with open(RESPONSE_TIMES_CSV_PATH, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    response_sec = float(row.get("response_time_seconds", 0))
+                    zone = row.get("zone", "")
+                    lg_id = row.get("lifeguard_id", "")
+                    lg_name = row.get("lifeguard_name", "")
+                    
+                    # Filter by zone if specified
+                    if zone_filter and zone != zone_filter:
+                        continue
+                    
+                    response_times.append(response_sec)
+                    recent_responses.append({
+                        "timestamp": row.get("timestamp", ""),
+                        "zone": zone,
+                        "lifeguard_id": lg_id,
+                        "lifeguard_name": lg_name,
+                        "response_time_seconds": response_sec,
+                        "alert_sent_at": row.get("alert_sent_at", ""),
+                        "responded_at": row.get("responded_at", "")
+                    })
+                    
+                    # Group by zone
+                    if zone not in by_zone:
+                        by_zone[zone] = []
+                    by_zone[zone].append(response_sec)
+                    
+                    # Group by lifeguard
+                    if lg_id not in by_lifeguard:
+                        by_lifeguard[lg_id] = {"name": lg_name, "times": []}
+                    by_lifeguard[lg_id]["times"].append(response_sec)
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        pass
+    
+    # Calculate statistics
+    avg_response_time = round(sum(response_times) / len(response_times), 2) if response_times else 0
+    min_response_time = round(min(response_times), 2) if response_times else 0
+    max_response_time = round(max(response_times), 2) if response_times else 0
+    
+    # Calculate by zone
+    zone_stats = {}
+    for zone, times in by_zone.items():
+        zone_stats[zone] = {
+            "count": len(times),
+            "avg": round(sum(times) / len(times), 2),
+            "min": round(min(times), 2),
+            "max": round(max(times), 2)
+        }
+    
+    # Calculate by lifeguard
+    lifeguard_stats = {}
+    for lg_id, data in by_lifeguard.items():
+        times = data["times"]
+        lifeguard_stats[lg_id] = {
+            "name": data["name"],
+            "count": len(times),
+            "avg": round(sum(times) / len(times), 2),
+            "min": round(min(times), 2),
+            "max": round(max(times), 2)
+        }
+    
+    return jsonify({
+        "overall": {
+            "total_responses": len(response_times),
+            "avg_response_time": avg_response_time,
+            "min_response_time": min_response_time,
+            "max_response_time": max_response_time
+        },
+        "by_zone": zone_stats,
+        "by_lifeguard": lifeguard_stats,
+        "recent": recent_responses[-limit:] if recent_responses else []
+    })
+
+
+@app.route("/api/zones/<int:zid>/crowd-status", methods=["GET"])
+def zone_crowd_status(zid: int):
+    """Get current crowd density status for a zone."""
+    with _crowd_lock:
+        status = CROWD_STATUS.get(zid, {
+            "count": 0,
+            "threshold": CROWD_THRESHOLDS.get(zid, 50),
+            "status": "normal",
+            "exceeded": False
+        })
+    
+    return jsonify({
+        "zone": zid,
+        "zone_name": _get_zone_display_name(zid),
+        "person_count": status.get("count", 0),
+        "threshold": status.get("threshold", 50),
+        "status": status.get("status", "normal"),
+        "exceeded": status.get("exceeded", False),
+        "safety_percentage": round((1 - min(1, status.get("count", 0) / max(1, status.get("threshold", 50)))) * 100, 1)
+    })
+
+
+@app.route("/api/analytics/crowd-status", methods=["GET"])
+def crowd_status_all():
+    """Get crowd density status for all zones."""
+    zones_status = {}
+    
+    with _crowd_lock:
+        for zid in ZONE_IDS:
+            status = CROWD_STATUS.get(zid, {
+                "count": 0,
+                "threshold": CROWD_THRESHOLDS.get(zid, 50),
+                "status": "normal",
+                "exceeded": False
+            })
+            person_count = status.get("count", 0)
+            threshold = status.get("threshold", 50)
+            
+            zones_status[zid] = {
+                "zone_name": _get_zone_display_name(zid),
+                "person_count": person_count,
+                "threshold": threshold,
+                "status": status.get("status", "normal"),
+                "exceeded": status.get("exceeded", False),
+                "safety_percentage": round((1 - min(1, person_count / max(1, threshold))) * 100, 1),
+                "crowding_level": round((person_count / max(1, threshold)) * 100, 1)
+            }
+    
+    # Count crowded zones
+    crowded_zones = sum(1 for z in zones_status.values() if z["exceeded"])
+    
+    return jsonify({
+        "zones": zones_status,
+        "crowded_zones_count": crowded_zones,
+        "total_zones": len(ZONE_IDS),
+        "overall_safety": "safe" if crowded_zones == 0 else "warning" if crowded_zones <= len(ZONE_IDS) // 2 else "critical"
+    })
+
+
+@app.route("/api/zones/<int:zid>/crowd-threshold", methods=["GET", "POST"])
+def crowd_threshold(zid: int):
+    """Get or set crowd threshold for a zone."""
+    if request.method == "GET":
+        threshold = CROWD_THRESHOLDS.get(zid, 50)
+        return jsonify({"zone": zid, "threshold": threshold})
+    
+    elif request.method == "POST":
+        data = request.get_json() or {}
+        new_threshold = data.get("threshold")
+        
+        if new_threshold is None or not isinstance(new_threshold, (int, float)):
+            return jsonify({"error": "threshold must be a number"}), 400
+        
+        new_threshold = int(new_threshold)
+        if new_threshold < 1:
+            return jsonify({"error": "threshold must be at least 1"}), 400
+        
+        with _crowd_lock:
+            CROWD_THRESHOLDS[zid] = new_threshold
+            _save_crowd_thresholds()
+        
+        return jsonify({
+            "zone": zid,
+            "threshold": new_threshold,
+            "message": f"Zone {zid} crowd threshold updated to {new_threshold} people"
+        })
+
+
+@app.route("/api/analytics/crowd-alerts", methods=["GET"])
+def crowd_alerts():
+    """Get crowd alert history."""
+    limit = int(request.args.get("limit", "100"))
+    zone_filter = request.args.get("zone", "").strip()
+    
+    with _crowd_lock:
+        alerts = []
+        for alert in list(CROWD_ALERT_HISTORY):
+            if zone_filter and str(alert.get("zone")) != str(zone_filter):
+                continue
+            alerts.append({
+                "timestamp": alert.get("ts"),
+                "zone": alert.get("zone"),
+                "zone_name": _get_zone_display_name(alert.get("zone")),
+                "person_count": alert.get("person_count"),
+                "threshold": alert.get("threshold"),
+                "severity": alert.get("severity"),
+            })
+            if len(alerts) >= limit:
+                break
+    
+    # Count by severity
+    severity_counts = {
+        "low": sum(1 for a in alerts if a["severity"] == "low"),
+        "medium": sum(1 for a in alerts if a["severity"] == "medium"),
+        "high": sum(1 for a in alerts if a["severity"] == "high")
+    }
+    
+    return jsonify({
+        "alerts": alerts,
+        "total": len(alerts),
+        "severity_counts": severity_counts,
+        "thresholds": dict(CROWD_THRESHOLDS)
+    })
+
+
 # ----------------- LIFEGUARD API ENDPOINTS -----------------
 
 @app.route("/api/lifeguards/register", methods=["POST"])
@@ -1765,25 +2161,53 @@ def lifeguard_respond(lg_id: str):
     alert_id = data.get("alert_id")
     zone = data.get("zone")
     
+    response_time_seconds = None
+    
     with _lifeguard_lock:
         if lg_id not in LIFEGUARDS:
             return jsonify({"error": "Lifeguard not found"}), 404
         
         lg = LIFEGUARDS[lg_id]
+        responded_at = datetime.now(timezone.utc)
+        
+        # Calculate response time if we have the alert sent time
+        if alert_id and alert_id in ALERT_SENT_TIMES:
+            alert_sent_time = ALERT_SENT_TIMES[alert_id]
+            response_time_seconds = time.time() - alert_sent_time
+            
+            # Log to CSV
+            try:
+                with open(RESPONSE_TIMES_CSV_PATH, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        datetime.now(timezone.utc).isoformat(),
+                        zone,
+                        lg_id,
+                        lg["name"],
+                        round(response_time_seconds, 2),
+                        datetime.fromtimestamp(alert_sent_time, tz=timezone.utc).isoformat(),
+                        responded_at.isoformat()
+                    ])
+            except Exception as e:
+                print(f"[response] Error logging response time: {e}")
+        
         response_record = {
             "lifeguard_id": lg_id,
             "lifeguard_name": lg["name"],
             "alert_id": alert_id,
             "zone": zone,
-            "responded_at": datetime.now(timezone.utc).isoformat()
+            "responded_at": responded_at.isoformat(),
+            "response_time_seconds": response_time_seconds
         }
         
         # Log response
-        print(f"[lifeguard] {lg['name']} responding to zone {zone}")
+        print(f"[lifeguard] {lg['name']} responding to zone {zone}" + 
+              (f" (response time: {response_time_seconds:.1f}s)" if response_time_seconds else ""))
         
         return jsonify({
             "message": f"{lg['name']} is responding to zone {zone}",
-            "response": response_record
+            "response": response_record,
+            "response_time_seconds": response_time_seconds
         })
 
 
@@ -1869,6 +2293,255 @@ def admin_broadcast():
                         pass
     
     return jsonify({"message": "Broadcast sent", "alert": alert})
+
+
+# =============== TELEGRAM NOTIFICATION ENDPOINTS ===============
+
+@app.route("/api/telegram/status", methods=["GET"])
+def telegram_status():
+    """Get Telegram bot connection status."""
+    return jsonify(notifier.test_connection())
+
+
+@app.route("/api/telegram/register", methods=["POST"])
+def telegram_register():
+    """Register a lifeguard's Telegram chat ID.
+    
+    Expected JSON:
+    {
+        "lifeguard_id": "abc12345",
+        "chat_id": 123456789,
+        "username": "@username" (optional)
+    }
+    """
+    data = request.get_json() or {}
+    lg_id = data.get("lifeguard_id", "").strip()
+    chat_id = data.get("chat_id")
+    username = data.get("username", "").strip()
+    
+    if not lg_id or not chat_id:
+        return jsonify({"error": "Missing lifeguard_id or chat_id"}), 400
+    
+    success = notifier.register_user(lg_id, chat_id, username)
+    
+    if success:
+        return jsonify({
+            "status": "registered",
+            "lifeguard_id": lg_id,
+            "chat_id": chat_id,
+            "message": f"Telegram registered for lifeguard {lg_id}"
+        }), 201
+    else:
+        return jsonify({
+            "status": "failed",
+            "message": "Failed to register Telegram"
+        }), 400
+
+
+@app.route("/api/telegram/unregister/<lg_id>", methods=["POST"])
+def telegram_unregister(lg_id: str):
+    """Unregister a lifeguard's Telegram."""
+    success = notifier.unregister_user(lg_id)
+    
+    if success:
+        return jsonify({
+            "status": "unregistered",
+            "lifeguard_id": lg_id,
+            "message": f"Telegram unregistered"
+        })
+    else:
+        return jsonify({
+            "error": "Not registered"
+        }), 404
+
+
+@app.route("/api/telegram/<lg_id>", methods=["GET"])
+def telegram_get_user(lg_id: str):
+    """Get Telegram info for a lifeguard."""
+    user_info = notifier.get_user(lg_id)
+    
+    if user_info:
+        # Include both the raw telegram info and a top-level chat_id field
+        # so frontend clients can easily consume this without knowing the
+        # internal structure of user_info.
+        chat_id = user_info.get("chat_id")
+        return jsonify({
+            "lifeguard_id": lg_id,
+            "telegram": user_info,
+            "chat_id": chat_id
+        })
+    else:
+        return jsonify({
+            "error": "Not registered"
+        }), 404
+
+
+@app.route("/api/telegram/<lg_id>/test", methods=["POST"])
+def telegram_test(lg_id: str):
+    """Send a test drowning alert for *this* lifeguard only.
+
+    Mapping rules (simple and deterministic):
+    - If the lifeguard ID looks like "lifeguard_<N>", always use Zone N.
+      (So lifeguard_1 -> Zone 1, lifeguard_3 -> Zone 3, etc.)
+    - Otherwise fall back to Zone 1.
+
+    This ignores the separate LIFEGUARDS registry on purpose so that
+    Telegram tests from the Lifeguards tab never jump to random zones.
+    """
+    if not notifier.enabled:
+        return jsonify({
+            "status": "error",
+            "message": "❌ Telegram bot not configured. Set COASTVISION_TELEGRAM_BOT_TOKEN environment variable."
+        }), 400
+
+    user_info = notifier.get_user(lg_id)
+    if not user_info:
+        return jsonify({
+            "status": "failed",
+            "message": "Lifeguard is not registered for Telegram.",
+            "lifeguard_id": lg_id,
+        }), 404
+
+    if user_info.get("paused"):
+        return jsonify({
+            "status": "paused",
+            "message": "Notifications are stopped for this lifeguard. Click Resume first.",
+            "lifeguard_id": lg_id,
+        }), 409
+
+    import random
+
+    # Infer zone directly from the lifeguard ID pattern lifeguard_<N>.
+    # This keeps tests 1:1 with the zone cards shown in the dashboard.
+    zid = 1
+    if isinstance(lg_id, str) and lg_id.startswith("lifeguard_"):
+        try:
+            parsed = int(lg_id.split("_", 1)[1])
+            if parsed > 0:
+                zid = parsed
+        except Exception:
+            zid = 1
+
+    zone_name = f"Zone {zid}"
+
+    detection_type = "Drowning"
+    confidence = random.uniform(78, 95)  # Realistic confidence range
+
+    success = notifier.send_alert(lg_id, zone_name, detection_type, confidence)
+
+    if success:
+        return jsonify({
+            "status": "sent",
+            "message": f"Test alert sent: {detection_type} in {zone_name} ({confidence:.1f}%)",
+            "lifeguard_id": lg_id,
+            "zone": zone_name,
+            "confidence": f"{confidence:.1f}%",
+            "detection_type": detection_type
+        }), 200
+    else:
+        # Likely causes: wrong chat ID, user has not started a conversation
+        # with the bot, or Telegram API rejected the chat.
+        last_error = ""
+        try:
+            last_error = notifier.get_last_error(lg_id)
+        except Exception:
+            last_error = ""
+        detail = f" Details: {last_error}" if last_error else ""
+        return jsonify({
+            "status": "failed",
+            "message": "Failed to send test alert. Please verify the chat ID and make sure this Telegram account has started a chat with the bot." + detail,
+            "lifeguard_id": lg_id,
+            "zone": zone_name,
+            "detection_type": detection_type,
+            "error_detail": last_error,
+        }), 400
+
+
+@app.route("/api/telegram/<lg_id>/pause", methods=["POST"])
+def telegram_pause(lg_id: str):
+    """Pause Telegram notifications for a lifeguard."""
+    success = notifier.set_paused(lg_id, True)
+    if not success:
+        return jsonify({"error": "Not registered"}), 404
+    return jsonify({
+        "status": "paused",
+        "lifeguard_id": lg_id,
+        "message": "Notifications stopped for this lifeguard"
+    })
+
+
+@app.route("/api/telegram/<lg_id>/resume", methods=["POST"])
+def telegram_resume(lg_id: str):
+    """Resume Telegram notifications for a lifeguard."""
+    success = notifier.set_paused(lg_id, False)
+    if not success:
+        return jsonify({"error": "Not registered"}), 404
+    return jsonify({
+        "status": "active",
+        "lifeguard_id": lg_id,
+        "message": "Notifications resumed for this lifeguard"
+    })
+
+
+@app.route("/api/telegram/alert", methods=["POST"])
+def telegram_send_alert():
+    """Manually send a Telegram alert (for testing).
+    
+    Expected JSON:
+    {
+        "lifeguard_id": "abc12345",
+        "zone": "Zone 3",
+        "detection_type": "Drowning",
+        "confidence": 95.5
+    }
+    """
+    data = request.get_json() or {}
+    lg_id = data.get("lifeguard_id", "").strip()
+    zone = data.get("zone", "Unknown Zone")
+    detection_type = data.get("detection_type", "Detection")
+    confidence = float(data.get("confidence", 0))
+    
+    if not lg_id:
+        return jsonify({"error": "Missing lifeguard_id"}), 400
+    
+    success = notifier.send_alert(lg_id, zone, detection_type, confidence)
+    
+    status_code = 200 if success else 400
+    return jsonify({
+        "status": "sent" if success else "failed",
+        "lifeguard_id": lg_id,
+        "zone": zone,
+        "detection_type": detection_type,
+        "confidence": confidence
+    }), status_code
+
+
+@app.route("/api/telegram/crowd-alert", methods=["POST"])
+def telegram_crowd_alert():
+    """Send a crowd density alert via Telegram.
+    
+    Expected JSON:
+    {
+        "zone": "Zone 3",
+        "person_count": 150,
+        "threshold": 100
+    }
+    """
+    data = request.get_json() or {}
+    zone = data.get("zone", "Unknown Zone")
+    person_count = int(data.get("person_count", 0))
+    threshold = int(data.get("threshold", 0))
+    
+    success = notifier.send_crowd_alert(zone, person_count, threshold)
+    
+    status_code = 200 if success else 400
+    return jsonify({
+        "status": "sent" if success else "failed",
+        "zone": zone,
+        "person_count": person_count,
+        "threshold": threshold
+    }), status_code
+
 
 
 if __name__ == "__main__":
