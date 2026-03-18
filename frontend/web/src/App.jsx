@@ -71,6 +71,7 @@ import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import EditIcon from "@mui/icons-material/Edit";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import SecurityIcon from "@mui/icons-material/Security";
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
 
 // Register Chart.js components
@@ -572,10 +573,10 @@ function PersonCountTimeline({ api, zoneId, zoneName }) {
   const colors = ["#2dd4bf","#34d399","#f59e0b","#a78bfa","#f472b6","#22d3ee"];
   const accentColor = colors[((zoneId || 1) - 1) % colors.length];
 
-  const { chartData, currentCount, peakCount, avgCount, dataPoints } = useMemo(() => {
+  const { chartData, currentCount, peakCount, avgCount, dataPoints, trendDirection } = useMemo(() => {
     const empty = {
       chartData: { labels: [], datasets: [{ label: "People", data: [], borderColor: accentColor, backgroundColor: "transparent", tension: 0.35 }] },
-      currentCount: 0, peakCount: 0, avgCount: 0, dataPoints: 0,
+      currentCount: 0, peakCount: 0, avgCount: 0, dataPoints: 0, trendDirection: "stable",
     };
     if (!timelineData?.timeline?.length) return empty;
 
@@ -583,14 +584,29 @@ function PersonCountTimeline({ api, zoneId, zoneName }) {
     const last24h = timelineData.timeline.filter(p => (now - p.timestamp * 1000) < 24 * 60 * 60 * 1000);
     if (!last24h.length) return empty;
 
-    const counts = last24h.map(p => p.count);
-    const peak = Math.max(...counts);
-    const avg = counts.reduce((a, b) => a + b, 0) / counts.length;
-    const current = counts[counts.length - 1];
+    // Keep every 2nd-3rd point to reduce clutter
+    const stride = Math.max(1, Math.floor(last24h.length / 20));
+    const filteredData = last24h.filter((_, idx) => idx % stride === 0 || idx === last24h.length - 1);
+    
+    const counts = filteredData.map(p => p.count);
+    const peak = Math.max(...last24h.map(p => p.count));
+    const avg = last24h.reduce((a, b) => a + b.count, 0) / last24h.length;
+    const current = last24h[last24h.length - 1].count;
+    
+    // Calculate trend
+    let trend = "stable";
+    if (last24h.length >= 2) {
+      const recent = last24h.slice(-5).map(p => p.count);
+      const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+      const older = last24h.slice(-10, -5).map(p => p.count);
+      const olderAvg = older.length ? older.reduce((a, b) => a + b, 0) / older.length : recentAvg;
+      if (recentAvg > olderAvg * 1.1) trend = "up";
+      else if (recentAvg < olderAvg * 0.9) trend = "down";
+    }
 
     return {
       chartData: {
-        labels: last24h.map(p => new Date(p.timestamp * 1000)),
+        labels: filteredData.map(p => new Date(p.timestamp * 1000)),
         datasets: [{
           label: "People Detected",
           data: counts,
@@ -599,136 +615,314 @@ function PersonCountTimeline({ api, zoneId, zoneName }) {
             if (!ctx.chart.chartArea) return "transparent";
             const { top, bottom } = ctx.chart.chartArea;
             const grad = ctx.chart.ctx.createLinearGradient(0, top, 0, bottom);
-            grad.addColorStop(0, accentColor + "40");
-            grad.addColorStop(0.6, accentColor + "10");
+            grad.addColorStop(0, accentColor + "70");
+            grad.addColorStop(0.5, accentColor + "40");
             grad.addColorStop(1, "transparent");
             return grad;
           },
-          borderWidth: 2.5,
-          tension: 0.35,
+          borderWidth: 3.5,
+          tension: 0.45,
           fill: true,
-          pointRadius: 0,
-          pointHoverRadius: 5,
-          pointHoverBackgroundColor: accentColor,
-          pointHoverBorderColor: "#fff",
-          pointHoverBorderWidth: 2,
+          pointRadius: 4,
+          pointHoverRadius: 8,
+          pointBackgroundColor: accentColor,
+          pointBorderColor: "#fff",
+          pointBorderWidth: 2.5,
+          pointHoverBackgroundColor: "#fff",
+          pointHoverBorderColor: accentColor,
+          pointHoverBorderWidth: 3,
+          segment: {
+            borderColor: (ctx) => ctx.p0DataIndex === undefined ? accentColor : accentColor + "dd",
+          },
         }],
       },
       currentCount: current,
       peakCount: peak,
       avgCount: avg,
       dataPoints: last24h.length,
+      trendDirection: trend,
     };
   }, [timelineData, zoneName, accentColor]);
 
   const chartOptions = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
-    animation: { duration: 400 },
+    animation: {
+      duration: 1000,
+      easing: "easeInOutQuart",
+      delay: (ctx) => {
+        let delay = 0;
+        if (ctx.type === "data") {
+          delay = ctx.dataIndex * 20 + ctx.datasetIndex * 100;
+        }
+        return delay;
+      },
+    },
+    animations: {
+      tension: { duration: 1000, from: 0.1, to: 0.3, loop: false },
+      fill: { duration: 1000 },
+      radius: { duration: 1000 },
+    },
     interaction: { mode: "index", intersect: false },
     plugins: {
       legend: { display: false },
       title: { display: false },
       tooltip: {
-        backgroundColor: "rgba(15,25,35,0.95)",
+        backgroundColor: "rgba(10,14,19,0.95)",
         titleColor: "#fff",
         bodyColor: "rgba(255,255,255,0.85)",
-        borderColor: accentColor + "50",
+        borderColor: "rgba(255,255,255,0.1)",
         borderWidth: 1,
         padding: 12,
         cornerRadius: 8,
-        titleFont: { size: 13, weight: "bold" },
-        bodyFont: { size: 12 },
+        titleFont: { size: 12, weight: "600" },
+        bodyFont: { size: 11, weight: "500" },
         displayColors: false,
+        boxPadding: 6,
         callbacks: {
           title: (items) => {
             if (!items.length) return "";
             const d = new Date(items[0].parsed.x);
             return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
           },
-          label: (item) => `People in zone: ${item.parsed.y}`,
+          label: (item) => `People: ${item.parsed.y}`,
         },
       },
     },
     scales: {
       x: {
         type: "time",
-        time: { unit: "minute", stepSize: 5, displayFormats: { minute: "HH:mm", hour: "HH:mm" } },
-        title: { display: true, text: "Time", color: "rgba(255,255,255,0.5)", font: { size: 12, weight: "600" }, padding: { top: 8 } },
-        ticks: { color: "rgba(255,255,255,0.45)", font: { size: 11 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
-        grid: { color: "rgba(255,255,255,0.04)", drawBorder: false },
+        time: { unit: "minute", stepSize: 15, displayFormats: { minute: "HH:mm", hour: "HH:mm" } },
+        title: { display: true, text: "Time", color: "rgba(255,255,255,0.5)", font: { size: 12, weight: "600" }, padding: { top: 12 } },
+        ticks: { color: "rgba(255,255,255,0.5)", font: { size: 11, weight: "500" }, maxRotation: 0, autoSkip: true, maxTicksLimit: 5 },
+        grid: { color: "rgba(255,255,255,0.08)", drawBorder: false, lineWidth: 1, drawTicks: false },
         border: { display: false },
       },
       y: {
         beginAtZero: true,
-        title: { display: true, text: "People Count", color: "rgba(255,255,255,0.5)", font: { size: 12, weight: "600" }, padding: { bottom: 8 } },
+        title: { display: true, text: "People Count", color: "rgba(255,255,255,0.5)", font: { size: 12, weight: "600" }, padding: { bottom: 12 } },
         ticks: {
-          color: "rgba(255,255,255,0.45)",
-          font: { size: 11 },
-          stepSize: 1,
+          color: "rgba(255,255,255,0.5)",
+          font: { size: 11, weight: "500" },
           precision: 0,
-          padding: 8,
+          padding: 10,
           callback: (v) => Number.isInteger(v) ? v : "",
         },
-        grid: { color: "rgba(255,255,255,0.04)", drawBorder: false },
+        grid: { color: "rgba(255,255,255,0.08)", drawBorder: false, lineWidth: 1, drawTicks: false },
         border: { display: false },
       },
     },
   }), [accentColor]);
 
   return (
-    <Box sx={{ borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", overflow: "hidden", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+    <Box sx={{
+      borderRadius: 3,
+      background: "#0f1419",
+      border: `1px solid rgba(255,255,255,0.08)`,
+      overflow: "hidden",
+      boxShadow: "0 4px 16px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.06)",
+      transition: "all 0.3s ease",
+      position: "relative",
+      "&:before": {
+        content: '""',
+        position: "absolute",
+        top: 0,
+        left: 0,
+        right: 0,
+        height: "1px",
+        background: `linear-gradient(90deg, transparent, ${accentColor}80, transparent)`,
+        opacity: 0.6,
+      },
+      "&:hover": {
+        boxShadow: "0 8px 24px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08)",
+        border: `1px solid rgba(255,255,255,0.12)`,
+      },
+    }}>
       {/* Card Header */}
-      <Box sx={{ px: 3, pt: 2.5, pb: 1.5, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
-          <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: accentColor, boxShadow: `0 0 8px ${accentColor}60` }} />
-          <Typography sx={{ fontWeight: 800, fontSize: 16, color: "#fff" }}>{zoneName}</Typography>
+      <Box sx={{ px: 4, pt: 3, pb: 2, display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(255,255,255,0.01)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2.5 }}>
+          <Box sx={{
+            width: 12,
+            height: 12,
+            borderRadius: "50%",
+            bgcolor: accentColor,
+            boxShadow: `0 0 12px ${accentColor}80`,
+            animation: "pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+            "@keyframes pulse": {
+              "0%, 100%": { opacity: 1, boxShadow: `0 0 12px ${accentColor}80` },
+              "50%": { opacity: 0.6, boxShadow: `0 0 8px ${accentColor}40` },
+            },
+          }} />
+          <Box>
+            <Typography sx={{ fontWeight: 700, fontSize: 15, color: "#fff", letterSpacing: "-0.4px", lineHeight: 1 }}>{zoneName}</Typography>
+            <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.45)", fontWeight: 500, mt: 0.2 }}>Person Count Timeline</Typography>
+          </Box>
         </Box>
-        <Chip
-          label={dataPoints > 0 ? `${dataPoints} data points` : "Waiting..."}
-          size="small"
-          sx={{ bgcolor: "rgba(255,255,255,0.04)", color: "rgba(255,255,255,0.45)", fontWeight: 600, fontSize: 11, height: 24 }}
-        />
+        <Box sx={{ display: "flex", alignItems: "center", gap: 3 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.8 }}>
+            <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "#22c55e", animation: "pulse 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite", boxShadow: "0 0 6px #22c55e60" }} />
+            <Typography sx={{ fontSize: 11, color: "#94a3b8", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.3px" }}>LIVE</Typography>
+          </Box>
+          <Chip
+            label={`${dataPoints} points`}
+            size="small"
+            sx={{
+              bgcolor: "rgba(255,255,255,0.05)",
+              color: "rgba(255,255,255,0.7)",
+              fontWeight: 600,
+              fontSize: 11,
+              height: 24,
+              border: "1px solid rgba(255,255,255,0.1)",
+              transition: "all 0.3s",
+            }}
+          />
+        </Box>
       </Box>
 
-      {/* Stats Row */}
-      <Box sx={{ px: 3, pb: 2, display: "flex", gap: 2 }}>
+      {/* Stats Row - Professional */}
+      <Box sx={{ px: 4, py: 2.5, display: "flex", gap: 2, background: "rgba(255,255,255,0.01)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
         {[
-          { label: "Current", value: currentCount, icon: "👤" },
-          { label: "Peak", value: peakCount, icon: "📈" },
-          { label: "Average", value: avgCount.toFixed(1), icon: "📊" },
-        ].map((s) => (
-          <Box key={s.label} sx={{ flex: 1, py: 1.5, px: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.04)", textAlign: "center" }}>
-            <Typography sx={{ fontSize: 12, mb: 0.25 }}>{s.icon}</Typography>
-            <Typography sx={{ fontSize: 22, fontWeight: 900, color: s.label === "Current" ? accentColor : "#fff", lineHeight: 1.1 }}>{s.value}</Typography>
-            <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.4)", fontWeight: 600, mt: 0.5, textTransform: "uppercase", letterSpacing: "0.5px" }}>{s.label}</Typography>
+          { label: "Current", value: currentCount, icon: "👤", color: accentColor, trend: trendDirection },
+          { label: "Peak", value: peakCount, icon: "📈", color: "#3b82f6" },
+          { label: "Avg", value: avgCount.toFixed(1), icon: "📊", color: "#8b5cf6" },
+        ].map((s, idx) => (
+          <Box key={s.label} sx={{
+            flex: 1,
+            py: 2,
+            px: 2.5,
+            borderRadius: 2,
+            background: "rgba(255,255,255,0.03)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            textAlign: "center",
+            transition: "all 0.25s ease",
+            cursor: "pointer",
+            position: "relative",
+            "&:before": {
+              content: '""',
+              position: "absolute",
+              top: 0,
+              left: 0,
+              right: 0,
+              height: "1px",
+              background: `linear-gradient(90deg, transparent, ${s.color}60, transparent)`,
+              opacity: 0.4,
+            },
+            "&:hover": {
+              background: "rgba(255,255,255,0.05)",
+              border: `1px solid ${s.color}40`,
+              boxShadow: `0 4px 12px ${s.color}15`,
+            },
+          }}>
+            <Typography sx={{ fontSize: 18, mb: 0.5, display: "block" }}>{s.icon}</Typography>
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 0.4, mb: 0.2 }}>
+              <Typography sx={{ 
+                fontSize: 24, 
+                fontWeight: 700, 
+                color: s.color, 
+                lineHeight: 1,
+                animation: "numPulse 0.8s cubic-bezier(0.34, 1.56, 0.64, 1)",
+                "@keyframes numPulse": {
+                  "0%": { transform: "scale(1.1)", opacity: 0.8 },
+                  "100%": { transform: "scale(1)", opacity: 1 },
+                },
+              }}>
+                {s.value}
+              </Typography>
+              {s.trend === "up" && <Typography sx={{ fontSize: 16, color: "#f59e0b", animation: "bounce 1s infinite" }}>📈</Typography>}
+              {s.trend === "down" && <Typography sx={{ fontSize: 16, color: "#ff5252" }}>📉</Typography>}
+            </Box>
+            <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.5)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.3px" }}>
+              {s.label}
+            </Typography>
           </Box>
         ))}
       </Box>
 
-      {/* Chart */}
-      <Box sx={{ px: 2, pb: 2, height: 240 }}>
+      {/* Chart Container - Professional Grid Design */}
+      <Box sx={{ 
+        px: 4, 
+        py: 4, 
+        minHeight: 320, 
+        position: "relative", 
+        background: "#0a0e13",
+        backgroundImage: `
+          linear-gradient(0deg, rgba(74,222,128,0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(74,222,128,0.03) 1px, transparent 1px)
+        `,
+        backgroundSize: '40px 40px',
+        borderTop: "1px solid rgba(255,255,255,0.06)",
+      }}>
         {dataPoints > 0 ? (
-          <Line data={chartData} options={chartOptions} />
-        ) : (
-          <Box sx={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1 }}>
-            <TrendingUpIcon sx={{ fontSize: 36, color: "rgba(255,255,255,0.08)" }} />
-            <Typography sx={{ color: "rgba(255,255,255,0.3)", fontSize: 13 }}>Collecting data...</Typography>
-            <Typography sx={{ color: "rgba(255,255,255,0.2)", fontSize: 11 }}>Person counts will appear here as the system detects people</Typography>
+          <Box sx={{ 
+            height: 300, 
+            position: "relative",
+            animation: "chartSlideIn 0.8s cubic-bezier(0.34, 1.56, 0.64, 1)",
+            "@keyframes chartSlideIn": {
+              "0%": { opacity: 0.7, transform: "scale(0.98)" },
+              "100%": { opacity: 1, transform: "scale(1)" },
+            },
+          }}>
+            <Box sx={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              background: "transparent",
+              pointerEvents: "none",
+              zIndex: 1,
+            }} />
+            <Line data={chartData} options={chartOptions} key={`${chartData.labels.length}`} />
           </Box>
-        )}
+        ) : (
+          <Box sx={{ height: 300, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2 }}>
+            <Box sx={{
+              width: 60,
+              height: 60,
+              borderRadius: "50%",
+              background: "rgba(74,222,128,0.1)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              animation: "float 3s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+              boxShadow: "0 0 16px rgba(74,222,128,0.2)",
+              "@keyframes float": {
+                "0%, 100%": { transform: "translateY(0px)" },
+                "50%": { transform: "translateY(-6px)" },
+              },
+            }}>
+              <TrendingUpIcon sx={{ fontSize: 32, color: "#22c55e" }} />
+            </Box>
+            <Typography sx={{ color: "rgba(255,255,255,0.8)", fontSize: 16, fontWeight: 600 }}>Collecting Live Data</Typography>
+            <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 12, fontWeight: 500, textAlign: "center", maxWidth: "85%" }}>Person counts will appear as detections happen in real-time</Typography>
+          </Box>
+        )
+      }
       </Box>
 
-      {/* Axis Legend */}
-      <Box sx={{ px: 3, pb: 2, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.25)", fontStyle: "italic" }}>
-          X-axis: Time (HH:MM) &nbsp;|&nbsp; Y-axis: Number of people detected in zone
-        </Typography>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
-          <Box sx={{ width: 16, height: 2, bgcolor: accentColor, borderRadius: 1 }} />
-          <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>Live count</Typography>
+      {/* Footer Insights */}
+      {dataPoints > 0 && (
+        <Box sx={{ px: 4, py: 2.5, background: "rgba(255,255,255,0.01)", borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+            <Box sx={{ height: 2, width: 20, borderRadius: 1, background: "rgba(74,222,128,0.4)", boxShadow: "0 0 8px rgba(74,222,128,0.2)" }} />
+            <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 500 }}>Timeline Chart</Typography>
+          </Box>
+          <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
+            <Chip
+              label={trendDirection === "up" ? "Trending Up" : trendDirection === "down" ? "Trending Down" : "Stable"}
+              size="small"
+              sx={{
+                bgcolor: trendDirection === "up" ? "rgba(59,130,246,0.1)" : trendDirection === "down" ? "rgba(255,82,82,0.1)" : "rgba(34,197,94,0.1)",
+                color: trendDirection === "up" ? "#3b82f6" : trendDirection === "down" ? "#ff5252" : "#22c55e",
+                fontWeight: 600,
+                fontSize: 10,
+                height: 24,
+                border: `1px solid ${trendDirection === "up" ? "rgba(59,130,246,0.3)" : trendDirection === "down" ? "rgba(255,82,82,0.3)" : "rgba(34,197,94,0.3)"}`,
+              }}
+            />
+          </Box>
         </Box>
-      </Box>
+      )}
     </Box>
   );
 }
@@ -825,6 +1019,368 @@ function ZoneNameEditor({ zoneId, currentName, api, onNameChanged }) {
   );
 }
 
+// ===================== TELEGRAM SETTINGS PANEL =====================
+function TelegramSettingsPanel({ api }) {
+  const [tgStatus, setTgStatus] = useState(null);
+  const [lifeguards, setLifeguards] = useState([]); // List of lifeguards with their chat IDs
+  const [message, setMessage] = useState("");
+  const [testingLg, setTestingLg] = useState(null); // Which lifeguard is being tested
+  const [loading, setLoading] = useState(true);
+  const [lifeguardDefs, setLifeguardDefs] = useState([]); // Dynamic lifeguard list derived from zones
+
+  // Derive lifeguard "slots" dynamically from zones so it always
+  // matches the current number of zones (Zone 1..N).
+  useEffect(() => {
+    const buildDefs = async () => {
+      try {
+        const r = await fetch(`${api}/api/zones`, { cache: "no-store" });
+        if (!r.ok) return;
+        const data = await r.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        const defs = items
+          .filter(z => Number.isFinite(z.id))
+          .sort((a, b) => a.id - b.id)
+          .map(z => ({
+            id: `lifeguard_${z.id}`,
+            name: z.name ? `Lifeguard – ${z.name}` : `Lifeguard for Zone ${z.id}`,
+            zoneId: z.id,
+          }));
+        setLifeguardDefs(defs);
+      } catch (e) {
+        console.error("Failed to load zones for lifeguards:", e);
+      }
+    };
+    buildDefs();
+  }, [api]);
+
+  // Get Telegram status on mount
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const r = await fetch(`${api}/api/telegram/status`, { cache: "no-store" });
+        if (r.ok) {
+          const data = await r.json();
+          setTgStatus(data);
+        }
+      } catch (e) {
+        console.error("Failed to fetch Telegram status:", e);
+      }
+    };
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 5000);
+    return () => clearInterval(interval);
+  }, [api]);
+
+  // Load all lifeguards' registration status on mount and whenever
+  // the lifeguard definitions (zones) change.
+  const loadAllLifeguards = useCallback(async () => {
+    if (!lifeguardDefs.length) {
+      setLifeguards([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const loaded = [];
+      for (const lg of lifeguardDefs) {
+        try {
+          const r = await fetch(`${api}/api/telegram/${lg.id}`, { cache: "no-store" });
+          if (r.ok) {
+            const data = await r.json();
+            // Support both the new API shape (top-level chat_id)
+            // and the older one where chat_id is nested under telegram.
+            const telegramInfo = data.telegram || {};
+            const chatRaw = data.chat_id != null ? data.chat_id : telegramInfo.chat_id;
+            loaded.push({ 
+              ...lg, 
+              chatId: chatRaw != null ? String(chatRaw) : "", 
+              isRegistered: chatRaw != null,
+              isPaused: !!telegramInfo.paused,
+            });
+          } else {
+            loaded.push({ ...lg, chatId: "", isRegistered: false, isPaused: false });
+          }
+        } catch (e) {
+          console.error(`Failed to load ${lg.id}:`, e);
+          loaded.push({ ...lg, chatId: "", isRegistered: false, isPaused: false });
+        }
+      }
+      setLifeguards(loaded);
+    } finally {
+      setLoading(false);
+    }
+  }, [api, lifeguardDefs]);
+
+  useEffect(() => {
+    loadAllLifeguards();
+  }, [loadAllLifeguards]);
+
+  const handleRegister = async (lgId, chatId) => {
+    if (!chatId.trim()) {
+      setMessage("Please enter a valid chat ID");
+      return;
+    }
+    try {
+      const r = await fetch(`${api}/api/telegram/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lifeguard_id: lgId, chat_id: chatId, username: "lifeguard" }),
+      });
+      if (r.ok) {
+        const lgName = lifeguardDefs.find(l => l.id === lgId)?.name;
+        setMessage(`✓ ${lgName} registered!`);
+        // Reload all lifeguards from backend to ensure persistence
+        await loadAllLifeguards();
+        setTimeout(() => setMessage(""), 3000);
+      } else {
+        const data = await r.json().catch(() => ({}));
+        setMessage(`Error: ${data.error || "Registration failed"}`);
+      }
+    } catch (e) {
+      setMessage(`Error: ${e.message}`);
+    }
+  };
+
+  const handleUnregister = async (lgId) => {
+    try {
+      const r = await fetch(`${api}/api/telegram/unregister/${lgId}`, { method: "POST" });
+      if (r.ok) {
+        setMessage(`✓ Unregistered`);
+        // Reload all lifeguards from backend
+        await loadAllLifeguards();
+        setTimeout(() => setMessage(""), 3000);
+      } else {
+        setMessage("Error: Unregistration failed");
+      }
+    } catch (e) {
+      setMessage(`Error: ${e.message}`);
+    }
+  };
+
+  const handleTest = async (lgId) => {
+    const lg = lifeguards.find(l => l.id === lgId);
+    if (!lg?.isRegistered) {
+      setMessage("Lifeguard not registered");
+      return;
+    }
+    if (lg?.isPaused) {
+      setMessage("Notifications are stopped for this lifeguard. Click Resume first.");
+      return;
+    }
+    setTestingLg(lgId);
+    try {
+      const r = await fetch(`${api}/api/telegram/${lgId}/test`, { method: "POST" });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.status === "sent") {
+        setMessage(`✓ Alert sent to ${lg.name}! Check Telegram`);
+        setTimeout(() => setMessage(""), 3000);
+      } else {
+        setMessage(`Error: ${data.message || "Failed to send test"}`);
+      }
+    } catch (e) {
+      setMessage(`Error: ${e.message}`);
+    } finally {
+      setTestingLg(null);
+    }
+  };
+
+  const handlePauseToggle = async (lgId, paused) => {
+    try {
+      const endpoint = paused ? "resume" : "pause";
+      const r = await fetch(`${api}/api/telegram/${lgId}/${endpoint}`, { method: "POST" });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        setMessage(paused ? "✓ Notifications resumed" : "✓ Notifications stopped");
+        await loadAllLifeguards();
+        setTimeout(() => setMessage(""), 3000);
+      } else {
+        setMessage(`Error: ${data.error || data.message || "Failed to update notification state"}`);
+      }
+    } catch (e) {
+      setMessage(`Error: ${e.message}`);
+    }
+  };
+
+  // Only block the UI with a loading state on first load.
+  // For later refreshes we keep showing the current lifeguard list
+  // so the panel doesn't "disappear" when you register.
+  if (loading && lifeguards.length === 0) {
+    return (
+      <Box sx={{ p: 3, textAlign: "center", color: "rgba(255,255,255,0.5)" }}>
+        Loading lifeguards...
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ p: 3, borderRadius: 3, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)", gridColumn: { md: "span 2" } }}>
+      <Typography sx={{ fontWeight: 700, mb: 2, color: "#2dd4bf" }}>Telegram Lifeguard Notifications</Typography>
+      <Stack spacing={2}>
+        {/* Status Indicator */}
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, p: 1.5, borderRadius: 2, bgcolor: "rgba(45,212,191,0.05)", border: "1px solid rgba(45,212,191,0.15)" }}>
+          <FiberManualRecordIcon sx={{ fontSize: 10, color: tgStatus?.status === "connected" ? "#34d399" : "#ef4444" }} />
+          <Typography sx={{ fontSize: 13, fontWeight: 600, color: tgStatus?.status === "connected" ? "#34d399" : "#ef4444" }}>
+            {tgStatus?.status === "connected" ? "✓ Bot Connected" : "✗ Bot Offline"}
+          </Typography>
+          {tgStatus?.users_registered > 0 && (
+            <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.5)", ml: "auto" }}>
+              {tgStatus.users_registered} lifeguard(s) registered
+            </Typography>
+          )}
+        </Box>
+
+        {/* Lifeguards List */}
+        <Box>
+          <Typography sx={{ fontSize: 14, fontWeight: 600, mb: 2 }}>Register Lifeguards</Typography>
+          <Stack spacing={1.5}>
+            {lifeguards.map((lg) => (
+              <LifeguardItem
+                key={lg.id}
+                lg={lg}
+                onRegister={handleRegister}
+                onUnregister={handleUnregister}
+                onTest={handleTest}
+                onPauseToggle={handlePauseToggle}
+                isTesting={testingLg === lg.id}
+              />
+            ))}
+          </Stack>
+        </Box>
+
+        {message && (
+          <Typography sx={{ fontSize: 12, color: message.includes("✓") ? "#34d399" : "#ef4444", p: 1, bgcolor: message.includes("✓") ? "rgba(52,211,153,0.1)" : "rgba(239,68,68,0.1)", borderRadius: 1 }}>
+            {message}
+          </Typography>
+        )}
+
+        {/* Help Text */}
+        <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.4)", fontStyle: "italic" }}>
+          💡 To get your chat ID: Start a chat with @userinfobot on Telegram and copy your ID (e.g., 1378328473)
+        </Typography>
+      </Stack>
+    </Box>
+  );
+}
+
+// Lifeguard Item Component
+function LifeguardItem({ lg, onRegister, onUnregister, onTest, onPauseToggle, isTesting }) {
+  const [chatIdInput, setChatIdInput] = useState("");
+
+  return (
+    <Box sx={{ p: 2, borderRadius: 2, bgcolor: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.1)" }}>
+      <Stack direction="row" spacing={2} alignItems="center">
+        <Box sx={{ flex: 1 }}>
+          <Typography sx={{ fontSize: 13, fontWeight: 600 }}>{lg.name}</Typography>
+          {lg.isRegistered ? (
+            <Typography sx={{ fontSize: 11, color: "#34d399", mt: 0.5 }}>
+              ✓ Registered: {lg.chatId}
+            </Typography>
+          ) : (
+            <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.4)", mt: 0.5 }}>
+              Not registered
+            </Typography>
+          )}
+          {lg.isRegistered && lg.isPaused && (
+            <Typography sx={{ fontSize: 11, color: "#f59e0b", mt: 0.5 }}>
+              Notifications stopped
+            </Typography>
+          )}
+        </Box>
+
+        {!lg.isRegistered ? (
+          <Stack direction="row" spacing={1}>
+            <TextField
+              size="small"
+              value={chatIdInput}
+              onChange={(e) => setChatIdInput(e.target.value)}
+              placeholder="Chat ID"
+              sx={{
+                width: 140,
+                "& .MuiOutlinedInput-root": {
+                  color: "#fff",
+                  fontSize: 12,
+                  bgcolor: "rgba(0,0,0,0.2)",
+                  "& fieldset": { borderColor: "rgba(255,255,255,0.1)" },
+                  "&:hover fieldset": { borderColor: "rgba(45,212,191,0.3)" },
+                  "&.Mui-focused fieldset": { borderColor: "#2dd4bf" },
+                },
+              }}
+            />
+            <Button
+              variant="contained"
+              size="small"
+              onClick={() => {
+                onRegister(lg.id, chatIdInput);
+                setChatIdInput("");
+              }}
+              disabled={!chatIdInput.trim()}
+              sx={{
+                background: "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)",
+                color: "#071520",
+                fontWeight: 600,
+                textTransform: "none",
+                fontSize: 11,
+                padding: "6px 12px",
+                "&:disabled": { opacity: 0.5 }
+              }}
+            >
+              Add
+            </Button>
+          </Stack>
+        ) : (
+          <Stack direction="row" spacing={1}>
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => onTest(lg.id)}
+              disabled={isTesting || lg.isPaused}
+              sx={{
+                borderColor: "#2dd4bf",
+                color: "#2dd4bf",
+                fontWeight: 600,
+                textTransform: "none",
+                fontSize: 11,
+                padding: "6px 12px",
+              }}
+            >
+              {isTesting ? "Testing..." : "Test"}
+            </Button>
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => onPauseToggle(lg.id, !!lg.isPaused)}
+              sx={{
+                borderColor: lg.isPaused ? "#22c55e" : "#f59e0b",
+                color: lg.isPaused ? "#22c55e" : "#f59e0b",
+                fontWeight: 600,
+                textTransform: "none",
+                fontSize: 11,
+                padding: "6px 12px",
+              }}
+            >
+              {lg.isPaused ? "Resume" : "Stop"}
+            </Button>
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => onUnregister(lg.id)}
+              sx={{
+                borderColor: "#ef4444",
+                color: "#ef4444",
+                fontWeight: 600,
+                textTransform: "none",
+                fontSize: 11,
+                padding: "6px 12px",
+              }}
+            >
+              Remove
+            </Button>
+          </Stack>
+        )}
+      </Stack>
+    </Box>
+  );
+}
 
 // ===================== VIDEO MANAGER COMPONENT =====================
 function VideoManager({ api, onReload }) {
@@ -1079,6 +1635,542 @@ function VideoManager({ api, onReload }) {
   );
 }
 
+// ===================== RESPONSE TIME ANALYTICS COMPONENT =====================
+function ResponseTimeAnalytics({ api }) {
+  const [rtData, setRtData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchResponseTimes = async () => {
+      try {
+        const res = await fetch(`${api}/api/analytics/response-times?limit=50`);
+        const data = await res.json();
+        setRtData(data);
+      } catch (e) {
+        console.error("Failed to fetch response times:", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchResponseTimes();
+    const interval = setInterval(fetchResponseTimes, 10000); // Refresh every 10 seconds
+    return () => clearInterval(interval);
+  }, [api]);
+
+  if (loading || !rtData) {
+    return (
+      <Box sx={{ py: 6, textAlign: "center" }}>
+        <LinearProgress sx={{ bgcolor: "rgba(255,255,255,0.05)" }} />
+        <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 13, mt: 2 }}>Loading response time data...</Typography>
+      </Box>
+    );
+  }
+
+  const { overall, by_zone, by_lifeguard, recent } = rtData;
+
+  return (
+    <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr 1fr" }, gap: 3 }}>
+      
+      {/* ── Overall Stats ── */}
+      <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 3 }}>
+          <AccessTimeIcon sx={{ fontSize: 28, color: "#2dd4bf" }} />
+          <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Overall Response Time</Typography>
+        </Box>
+        
+        <Stack spacing={2}>
+          <Box sx={{ display: "flex", justifyContent: "space-between", p: 2.5, borderRadius: 2, bgcolor: "rgba(45,212,191,0.08)", border: "1px solid rgba(45,212,191,0.15)" }}>
+            <Typography sx={{ color: "rgba(255,255,255,0.6)", fontWeight: 600, fontSize: 14 }}>Average</Typography>
+            <Typography sx={{ fontSize: 24, fontWeight: 900, color: "#2dd4bf" }}>{overall.avg_response_time}s</Typography>
+          </Box>
+          <Box sx={{ display: "flex", justifyContent: "space-between", p: 2.5, borderRadius: 2, bgcolor: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.15)" }}>
+            <Typography sx={{ color: "rgba(255,255,255,0.6)", fontWeight: 600, fontSize: 14 }}>Fastest</Typography>
+            <Typography sx={{ fontSize: 24, fontWeight: 900, color: "#22d3ee" }}>{overall.min_response_time}s</Typography>
+          </Box>
+          <Box sx={{ display: "flex", justifyContent: "space-between", p: 2.5, borderRadius: 2, bgcolor: "rgba(244,114,182,0.08)", border: "1px solid rgba(244,114,182,0.15)" }}>
+            <Typography sx={{ color: "rgba(255,255,255,0.6)", fontWeight: 600, fontSize: 14 }}>Slowest</Typography>
+            <Typography sx={{ fontSize: 24, fontWeight: 900, color: "#f472b6" }}>{overall.max_response_time}s</Typography>
+          </Box>
+          <Box sx={{ display: "flex", justifyContent: "space-between", p: 2.5, borderRadius: 2, bgcolor: "rgba(52,211,153,0.08)", border: "1px solid rgba(52,211,153,0.15)" }}>
+            <Typography sx={{ color: "rgba(255,255,255,0.6)", fontWeight: 600, fontSize: 14 }}>Total Responses</Typography>
+            <Typography sx={{ fontSize: 24, fontWeight: 900, color: "#34d399" }}>{overall.total_responses}</Typography>
+          </Box>
+        </Stack>
+      </Box>
+
+      {/* ── By Lifeguard ── */}
+      <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 3 }}>
+          <PersonIcon sx={{ fontSize: 28, color: "#f59e0b" }} />
+          <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>By Lifeguard</Typography>
+        </Box>
+        
+        {Object.entries(by_lifeguard).length > 0 ? (
+          <Stack spacing={1.5} sx={{ maxHeight: 400, overflowY: "auto" }}>
+            {Object.entries(by_lifeguard).map(([lg_id, stats]) => (
+              <Box key={lg_id} sx={{ p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}>
+                <Typography sx={{ fontSize: 13, fontWeight: 700, color: "#fff", mb: 1 }}>{stats.name}</Typography>
+                <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, fontSize: 12 }}>
+                  <Box><Typography sx={{ color: "rgba(255,255,255,0.5)", fontSize: 11 }}>Avg</Typography><Typography sx={{ color: "#2dd4bf", fontWeight: 700 }}>{stats.avg}s</Typography></Box>
+                  <Box><Typography sx={{ color: "rgba(255,255,255,0.5)", fontSize: 11 }}>Responses</Typography><Typography sx={{ color: "#34d399", fontWeight: 700 }}>{stats.count}</Typography></Box>
+                </Box>
+              </Box>
+            ))}
+          </Stack>
+        ) : (
+          <Typography sx={{ color: "rgba(255,255,255,0.4)", textAlign: "center", py: 4, fontSize: 13 }}>No response data</Typography>
+        )}
+      </Box>
+
+      {/* ── By Zone ── */}
+      <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 3 }}>
+          <WavesIcon sx={{ fontSize: 28, color: "#a78bfa" }} />
+          <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>By Zone</Typography>
+        </Box>
+        
+        {Object.entries(by_zone).length > 0 ? (
+          <Stack spacing={1.5} sx={{ maxHeight: 400, overflowY: "auto" }}>
+            {Object.entries(by_zone).map(([zone, stats]) => (
+              <Box key={zone} sx={{ p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}>
+                <Typography sx={{ fontSize: 13, fontWeight: 700, color: "#fff", mb: 1 }}>Zone {zone}</Typography>
+                <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, fontSize: 12 }}>
+                  <Box><Typography sx={{ color: "rgba(255,255,255,0.5)", fontSize: 11 }}>Avg</Typography><Typography sx={{ color: "#2dd4bf", fontWeight: 700 }}>{stats.avg}s</Typography></Box>
+                  <Box><Typography sx={{ color: "rgba(255,255,255,0.5)", fontSize: 11 }}>Alerts</Typography><Typography sx={{ color: "#34d399", fontWeight: 700 }}>{stats.count}</Typography></Box>
+                </Box>
+              </Box>
+            ))}
+          </Stack>
+        ) : (
+          <Typography sx={{ color: "rgba(255,255,255,0.4)", textAlign: "center", py: 4, fontSize: 13 }}>No zone data</Typography>
+        )}
+      </Box>
+
+      {/* ── Recent Responses (Full Width) ── */}
+      {recent.length > 0 && (
+        <Box sx={{ gridColumn: "1 / -1", p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff", mb: 3 }}>Recent Responses</Typography>
+          
+          <Box sx={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Lifeguard</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Zone</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Response Time</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recent.map((r, i) => (
+                  <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                    <td style={{ padding: "12px 16px", color: "#fff", fontWeight: 600 }}>{r.lifeguard_name}</td>
+                    <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.8)" }}>Zone {r.zone}</td>
+                    <td style={{ padding: "12px 16px" }}>
+                      <Chip label={`${r.response_time_seconds}s`} size="small" sx={{ bgcolor: r.response_time_seconds < 30 ? "rgba(52,211,153,0.2)" : r.response_time_seconds < 60 ? "rgba(245,158,11,0.2)" : "rgba(244,114,182,0.2)", color: r.response_time_seconds < 30 ? "#34d399" : r.response_time_seconds < 60 ? "#f59e0b" : "#f472b6", fontWeight: 700, height: 24 }} />
+                    </td>
+                    <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.5)" }}>
+                      {new Date(r.responded_at).toLocaleTimeString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Box>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+// ===================== CROWD DENSITY ANALYTICS COMPONENT =====================
+function CrowdDensityAnalytics({ api, zones, zoneNames }) {
+  const [crowdData, setCrowdData] = useState(null);
+  const [crowdAlerts, setCrowdAlerts] = useState([]);
+  const [editingZone, setEditingZone] = useState(null);
+  const [newThreshold, setNewThreshold] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchCrowdData = async () => {
+      try {
+        const [statusRes, alertsRes] = await Promise.all([
+          fetch(`${api}/api/analytics/crowd-status`),
+          fetch(`${api}/api/analytics/crowd-alerts?limit=50`)
+        ]);
+        
+        const statusData = await statusRes.json();
+        const alertsData = await alertsRes.json();
+        
+        setCrowdData(statusData);
+        setCrowdAlerts(alertsData.alerts || []);
+      } catch (e) {
+        console.error("Failed to fetch crowd data:", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchCrowdData();
+    const interval = setInterval(fetchCrowdData, 5000); // Refresh every 5 seconds
+    return () => clearInterval(interval);
+  }, [api]);
+
+  const handleThresholdChange = async (zid) => {
+    if (!newThreshold || isNaN(newThreshold)) return;
+    
+    setSaving(true);
+    try {
+      const res = await fetch(`${api}/api/zones/${zid}/crowd-threshold`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ threshold: parseInt(newThreshold) })
+      });
+      
+      if (res.ok) {
+        setEditingZone(null);
+        setNewThreshold("");
+        // Refresh data
+        const crowdRes = await fetch(`${api}/api/analytics/crowd-status`);
+        const newData = await crowdRes.json();
+        setCrowdData(newData);
+      }
+    } catch (e) {
+      console.error("Failed to update threshold:", e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const getHeatmapColor = (percent) => {
+    if (percent < 30) return { bg: "rgba(52, 211, 153, 0.15)", border: "#34d399", text: "#34d399", label: "Safe" };
+    if (percent < 60) return { bg: "rgba(34, 211, 238, 0.15)", border: "#22d3ee", text: "#22d3ee", label: "Normal" };
+    if (percent < 85) return { bg: "rgba(245, 158, 11, 0.15)", border: "#f59e0b", text: "#f59e0b", label: "Caution" };
+    return { bg: "rgba(255, 82, 82, 0.2)", border: "#ff5252", text: "#ff5252", label: "Critical" };
+  };
+
+  if (loading || !crowdData) {
+    return (
+      <Box sx={{ py: 6, textAlign: "center" }}>
+        <LinearProgress sx={{ bgcolor: "rgba(255,255,255,0.05)" }} />
+        <Typography sx={{ color: "rgba(255,255,255,0.4)", fontSize: 13, mt: 2 }}>Loading crowd data...</Typography>
+      </Box>
+    );
+  }
+
+  const { zones: zonesStatus, crowded_zones_count, overall_safety } = crowdData;
+  const zoneArray = Object.entries(zonesStatus);
+
+  return (
+    <Box sx={{ display: "grid", gridTemplateColumns: "1fr", gap: 3 }}>
+      
+      {/* ── Overall Safety Status ── */}
+      <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 3 }}>
+          <WavesIcon sx={{ fontSize: 28, color: overall_safety === "safe" ? "#34d399" : overall_safety === "warning" ? "#f59e0b" : "#ff5252" }} />
+          <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff" }}>Overall Safety Status</Typography>
+        </Box>
+        
+        <Stack spacing={2}>
+          <Box sx={{
+            p: 3,
+            borderRadius: 2,
+            bgcolor: overall_safety === "safe" ? "rgba(52,211,153,0.1)" : overall_safety === "warning" ? "rgba(245,158,11,0.1)" : "rgba(255,82,82,0.1)",
+            border: `1px solid ${overall_safety === "safe" ? "rgba(52,211,153,0.2)" : overall_safety === "warning" ? "rgba(245,158,11,0.2)" : "rgba(255,82,82,0.2)"}`
+          }}>
+            <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.6)", fontWeight: 600, mb: 1, textTransform: "uppercase" }}>Status</Typography>
+            <Typography sx={{
+              fontSize: 32,
+              fontWeight: 900,
+              color: overall_safety === "safe" ? "#34d399" : overall_safety === "warning" ? "#f59e0b" : "#ff5252",
+              textTransform: "uppercase"
+            }}>
+              {overall_safety}
+            </Typography>
+          </Box>
+          
+          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
+            <Box sx={{ p: 2.5, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}>
+              <Typography sx={{ color: "rgba(255,255,255,0.5)", fontSize: 12, fontWeight: 600, mb: 0.5 }}>Crowded Zones</Typography>
+              <Typography sx={{ fontSize: 28, fontWeight: 900, color: crowded_zones_count > 0 ? "#ff5252" : "#34d399" }}>{crowded_zones_count}</Typography>
+            </Box>
+            <Box sx={{ p: 2.5, borderRadius: 2, bgcolor: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}>
+              <Typography sx={{ color: "rgba(255,255,255,0.5)", fontSize: 12, fontWeight: 600, mb: 0.5 }}>Total Zones</Typography>
+              <Typography sx={{ fontSize: 28, fontWeight: 900, color: "#2dd4bf" }}>{zoneArray.length}</Typography>
+            </Box>
+          </Box>
+        </Stack>
+      </Box>
+
+      {/* ── CROWD DENSITY ZONES ── */}
+      <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#060c12", border: "2px solid rgba(45,212,191,0.15)", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }}>
+        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 3 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+            <Box sx={{ width: 12, height: 12, borderRadius: "50%", bgcolor: "#2dd4bf", boxShadow: "0 0 12px #2dd4bf80", animation: "pulse 2s infinite" }} />
+            <Typography sx={{ fontWeight: 900, fontSize: 26, color: "#fff" }}>Crowd Density</Typography>
+          </Box>
+          <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.45)", fontWeight: 600 }}>Live zone monitoring</Typography>
+        </Box>
+
+        {/* Zone Cards Grid */}
+        <Box sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "repeat(2, 1fr)", sm: "repeat(3, 1fr)", md: "repeat(4, 1fr)", lg: "repeat(5, 1fr)" },
+          gap: 2.5,
+          mb: 3
+        }}>
+          {zoneArray.map(([zid, status]) => {
+            const percent = Math.min(100, (status.crowding_level || 0));
+            let cardBg = "#1a3a3a", borderColor = "#34d399", badgeColor = "#34d399", badgeLabel = "✅ Safe"; // Safe
+            if (percent >= 30) { cardBg = "#1a3a4a"; borderColor = "#22d3ee"; badgeColor = "#22d3ee"; badgeLabel = "📊 Normal"; }
+            if (percent >= 60) { cardBg = "#3a3a1a"; borderColor = "#f59e0b"; badgeColor = "#f59e0b"; badgeLabel = "⚠️ Caution"; }
+            if (percent >= 85) { cardBg = "#3a1a1a"; borderColor = "#ff5252"; badgeColor = "#ff5252"; badgeLabel = "🔴 Critical"; }
+            
+            const isEditing = editingZone === parseInt(zid);
+
+            return (
+              <Box
+                key={zid}
+                sx={{
+                  p: 2.5,
+                  borderRadius: 3,
+                  bgcolor: cardBg,
+                  border: `2px solid ${borderColor}`,
+                  boxShadow: `0 0 20px ${borderColor}20, inset 0 1px 2px rgba(255,255,255,0.05)`,
+                  transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+                  position: "relative",
+                  overflow: "hidden",
+                  "&:before": {
+                    content: '""',
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: "2px",
+                    background: `linear-gradient(90deg, transparent, ${borderColor}, transparent)`,
+                    animation: "shimmer 2s infinite",
+                  },
+                  "&:hover": {
+                    boxShadow: `0 0 30px ${borderColor}40, inset 0 1px 2px rgba(255,255,255,0.1)`,
+                    transform: "translateY(-2px)",
+                  },
+                  "@keyframes shimmer": {
+                    "0%, 100%": { opacity: 0.5 },
+                    "50%": { opacity: 1 },
+                  },
+                }}
+              >
+                {/* Status Badge */}
+                <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1.5 }}>
+                  <Chip
+                    label={badgeLabel}
+                    size="small"
+                    sx={{
+                      bgcolor: `${badgeColor}20`,
+                      color: badgeColor,
+                      fontWeight: 800,
+                      height: 28,
+                      fontSize: 11,
+                      border: `1px solid ${badgeColor}`,
+                      borderRadius: 1.5
+                    }}
+                  />
+                  <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.4)", fontWeight: 600 }}>{percent.toFixed(0)}%</Typography>
+                </Box>
+
+                {/* Zone Name */}
+                <Typography sx={{ fontSize: 14, fontWeight: 800, color: "#fff", mb: 1.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {status.zone_name}
+                </Typography>
+
+                {/* Person Count - Large Display */}
+                <Box sx={{ mb: 2, p: 2, borderRadius: 2, bgcolor: "rgba(0,0,0,0.3)", textAlign: "center", border: `1px solid ${borderColor}30` }}>
+                  <Typography sx={{ fontSize: 28, fontWeight: 900, color: borderColor, textShadow: `0 0 12px ${borderColor}40` }}>
+                    {status.person_count}
+                  </Typography>
+                  <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.5)", fontWeight: 600 }}>People Detected</Typography>
+                </Box>
+
+                {/* Progress Bar */}
+                <Box sx={{ mb: 2 }}>
+                  <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.5 }}>
+                    <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.5)", fontWeight: 600 }}>Crowding Level</Typography>
+                    <Typography sx={{ fontSize: 10, color: borderColor, fontWeight: 700 }}>{percent.toFixed(0)}% / 100%</Typography>
+                  </Box>
+                  <Box sx={{ width: "100%", height: 6, borderRadius: 3, bgcolor: "rgba(255,255,255,0.08)", border: `1px solid ${borderColor}20`, overflow: "hidden" }}>
+                    <Box
+                      sx={{
+                        height: "100%",
+                        width: `${percent}%`,
+                        background: `linear-gradient(90deg, ${borderColor}, ${borderColor}80)`,
+                        borderRadius: 3,
+                        transition: "width 0.4s ease",
+                        boxShadow: `0 0 12px ${borderColor}60`
+                      }}
+                    />
+                  </Box>
+                </Box>
+
+                {/* Threshold Section */}
+                <Box sx={{ mb: 2, p: 1.5, borderRadius: 2, bgcolor: "rgba(0,0,0,0.2)", border: `1px solid ${borderColor}15` }}>
+                  <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.4)", fontWeight: 600, mb: 0.5 }}>Threshold Setting</Typography>
+                  {isEditing ? (
+                    <Box sx={{ display: "flex", gap: 0.75 }}>
+                      <TextField
+                        autoFocus
+                        size="small"
+                        type="number"
+                        value={newThreshold}
+                        onChange={(e) => setNewThreshold(e.target.value)}
+                        placeholder={status.threshold.toString()}
+                        sx={{
+                          flex: 1,
+                          "& .MuiOutlinedInput-root": {
+                            height: 32,
+                            bgcolor: "rgba(0,0,0,0.3)",
+                            color: "#fff",
+                            fontSize: 12,
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleThresholdChange(parseInt(zid));
+                          if (e.key === "Escape") setEditingZone(null);
+                        }}
+                      />
+                      <Button
+                        size="small"
+                        onClick={() => handleThresholdChange(parseInt(zid))}
+                        disabled={saving}
+                        sx={{ 
+                          bgcolor: "#2dd4bf", 
+                          color: "#000", 
+                          fontWeight: 800, 
+                          fontSize: 11, 
+                          px: 1.5, 
+                          height: 32,
+                          transition: "all 0.2s",
+                          "&:hover": { bgcolor: "#14b8a6" },
+                          "&:disabled": { opacity: 0.6 }
+                        }}
+                      >
+                        Save
+                      </Button>
+                    </Box>
+                  ) : (
+                    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <Box>
+                        <Typography sx={{ fontSize: 18, fontWeight: 900, color: borderColor }}>
+                          {status.threshold}
+                        </Typography>
+                        <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.4)" }}>people limit</Typography>
+                      </Box>
+                      <Button
+                        size="small"
+                        onClick={() => { setEditingZone(parseInt(zid)); setNewThreshold(status.threshold.toString()); }}
+                        sx={{
+                          color: borderColor,
+                          fontSize: 10,
+                          fontWeight: 700,
+                          border: `1px solid ${borderColor}`,
+                          borderRadius: 1.5,
+                          px: 1.5,
+                          py: 0.75,
+                          transition: "all 0.2s",
+                          "&:hover": { bgcolor: `${borderColor}15` }
+                        }}
+                      >
+                        ✏️ Edit
+                      </Button>
+                    </Box>
+                  )}
+                </Box>
+              </Box>
+            );
+          })}
+        </Box>
+
+        {/* Summary Stats */}
+        <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr 1fr", sm: "repeat(4, 1fr)" }, gap: 2, p: 3, borderRadius: 3, bgcolor: "rgba(45,212,191,0.05)", border: "1px solid rgba(45,212,191,0.12)" }}>
+          {[
+            { label: "📍 Total Zones", value: zoneArray.length, unit: "zones", color: "#2dd4bf" },
+            { label: "👥 Total People", value: zoneArray.reduce((sum, [_, z]) => sum + (z.person_count || 0), 0), unit: "people", color: "#22d3ee" },
+            { label: "⚠️ Alert Zones", value: zoneArray.filter(([_, z]) => z.crowding_level >= 60).length, unit: "zones", color: "#f59e0b" },
+            { label: "🔴 Critical Zones", value: zoneArray.filter(([_, z]) => z.crowding_level >= 85).length, unit: "zones", color: "#ff5252" }
+          ].map((stat) => (
+            <Box key={stat.label} sx={{ textAlign: "center", p: 2, borderRadius: 2, bgcolor: "rgba(0,0,0,0.15)", border: `1px solid ${stat.color}15`, transition: "all 0.3s" }}>
+              <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.5)", fontWeight: 700, mb: 0.75 }}>{stat.label}</Typography>
+              <Box sx={{ display: "flex", alignItems: "baseline", justifyContent: "center", gap: 0.5 }}>
+                <Typography sx={{ fontSize: 22, fontWeight: 900, color: stat.color }}>
+                  {stat.value}
+                </Typography>
+                <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.4)" }}>{stat.unit}</Typography>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      </Box>
+
+      {/* ── Crowd Alerts History ── */}
+      {crowdAlerts.length > 0 && (
+        <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff", mb: 3 }}>📋 Crowding Incidents</Typography>
+          
+          <Box sx={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Zone</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Person Count</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Threshold</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Severity</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {crowdAlerts.slice(0, 30).map((alert, i) => {
+                  const severityColor = alert.severity === "low" ? "#f59e0b" : alert.severity === "medium" ? "#ff5252" : "#ff1744";
+                  return (
+                    <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                      <td style={{ padding: "12px 16px", fontWeight: 600, color: "#2dd4bf" }}>{alert.zone_name}</td>
+                      <td style={{ padding: "12px 16px", color: "#fff", fontWeight: 600 }}>{alert.person_count}</td>
+                      <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.7)" }}>{alert.threshold}</td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <Chip
+                          label={alert.severity.toUpperCase()}
+                          size="small"
+                          sx={{
+                            bgcolor: `${severityColor}20`,
+                            color: severityColor,
+                            fontWeight: 700,
+                            height: 24,
+                            fontSize: 10
+                          }}
+                        />
+                      </td>
+                      <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.5)" }}>
+                        {new Date(alert.timestamp).toLocaleTimeString()}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </Box>
+        </Box>
+      )}
+
+      {/* ── No Alerts Message ── */}
+      {crowdAlerts.length === 0 && (
+        <Box sx={{ p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", textAlign: "center" }}>
+          <CheckCircleIcon sx={{ fontSize: 48, color: "#34d399", mb: 2 }} />
+          <Typography sx={{ color: "rgba(255,255,255,0.6)", fontSize: 14 }}>✅ No crowding incidents recorded</Typography>
+        </Box>
+      )}
+    </Box>
+  );
+}
 
 export default function App() {
   const [tab, setTab] = useState(0);
@@ -1611,6 +2703,7 @@ export default function App() {
             <Tab icon={<AnalyticsIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Analytics" />
             <Tab icon={<HistoryIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Event Logs" />
             <Tab icon={<SettingsIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Settings" />
+            <Tab icon={<SecurityIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Lifeguards" />
             <Tab icon={<VideoLibraryIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Videos" />
           </Tabs>
         </Box>
@@ -1784,8 +2877,10 @@ export default function App() {
               {[
                 { key: "overview", label: "Overview", icon: <DashboardIcon sx={{ fontSize: 18 }} /> },
                 { key: "timeline", label: "Person Count", icon: <TrendingUpIcon sx={{ fontSize: 18 }} /> },
+                { key: "crowd", label: "Crowd Density", icon: <PersonIcon sx={{ fontSize: 18 }} /> },
                 { key: "detections", label: "Detections", icon: <NotificationsActiveIcon sx={{ fontSize: 18 }} /> },
                 { key: "activity", label: "Live Feed", icon: <HistoryIcon sx={{ fontSize: 18 }} /> },
+                { key: "response_times", label: "Response Times", icon: <AccessTimeIcon sx={{ fontSize: 18 }} /> },
               ].map((s) => (
                 <Button
                   key={s.key}
@@ -2002,6 +3097,11 @@ export default function App() {
               </Box>
             )}
 
+            {/* ── CROWD DENSITY ANALYTICS SECTION ── */}
+            {analyticsSection === "crowd" && (
+              <CrowdDensityAnalytics api={API} zones={zones} zoneNames={zoneNames} />
+            )}
+
             {/* ── DETECTIONS SECTION ── */}
             {analyticsSection === "detections" && (
               <Box>
@@ -2135,6 +3235,11 @@ export default function App() {
                   )}
                 </Box>
               </Box>
+            )}
+
+            {/* ── RESPONSE TIMES ANALYTICS SECTION ── */}
+            {analyticsSection === "response_times" && (
+              <ResponseTimeAnalytics api={API} />
             )}
           </Box>
         )}
@@ -2293,11 +3398,85 @@ export default function App() {
                   </Box>
                 </Stack>
               </Box>
+
+              {/* Lifeguard Readiness */}
+              <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "1.1fr 1.1fr" }, gap: 3 }}>
+                <Box sx={{ p: 3, borderRadius: 3, bgcolor: "#020617", border: "1px solid rgba(148,163,184,0.35)", boxShadow: "0 18px 45px rgba(15,23,42,0.95)", position: "relative", overflow: "hidden" }}>
+                  <Box
+                    sx={{
+                      position: "absolute",
+                      inset: -40,
+                      background: "radial-gradient(circle at top left, rgba(45,212,191,0.25), transparent 60%)",
+                      opacity: 0.8,
+                      pointerEvents: "none",
+                    }}
+                  />
+                  <Stack spacing={2.5} sx={{ position: "relative" }}>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+                      <Avatar sx={{ bgcolor: "rgba(56,189,248,0.14)", border: "1px solid rgba(56,189,248,0.4)", width: 42, height: 42 }}>
+                        <SecurityIcon sx={{ fontSize: 24, color: "#38bdf8" }} />
+                      </Avatar>
+                      <Box>
+                        <Typography sx={{ fontSize: 15, fontWeight: 700, letterSpacing: 0.4 }}>Lifeguard Readiness Overview</Typography>
+                        <Typography sx={{ fontSize: 12, color: "rgba(148,163,184,0.9)" }}>
+                          Keep at least one lifeguard registered for every active zone to ensure no area is unprotected.
+                        </Typography>
+                      </Box>
+                    </Box>
+
+                    <Divider sx={{ borderColor: "rgba(148,163,184,0.18)" }} />
+
+                    <Stack spacing={1.5}>
+                      <Typography sx={{ fontSize: 12, color: "rgba(148,163,184,0.9)", textTransform: "uppercase", letterSpacing: 1.5 }}>
+                        Quick Tips
+                      </Typography>
+                      <Stack spacing={1} sx={{ fontSize: 12.5, color: "rgba(226,232,240,0.9)" }}>
+                        <Box sx={{ display: "flex", gap: 1 }}>
+                          <CheckCircleIcon sx={{ fontSize: 16, color: "#4ade80", mt: "2px" }} />
+                          <Typography sx={{ fontSize: 12.5 }}>
+                            Use @userinfobot on Telegram to get each lifeguard&apos;s chat ID.
+                          </Typography>
+                        </Box>
+                        <Box sx={{ display: "flex", gap: 1 }}>
+                          <CheckCircleIcon sx={{ fontSize: 16, color: "#f97316", mt: "2px" }} />
+                          <Typography sx={{ fontSize: 12.5 }}>
+                            Map lifeguards to their primary zone so they receive the most relevant alerts first.
+                          </Typography>
+                        </Box>
+                        <Box sx={{ display: "flex", gap: 1 }}>
+                          <CheckCircleIcon sx={{ fontSize: 16, color: "#38bdf8", mt: "2px" }} />
+                          <Typography sx={{ fontSize: 12.5 }}>
+                            Use the Test button regularly to verify that devices and network are working.
+                          </Typography>
+                        </Box>
+                      </Stack>
+                    </Stack>
+
+                    <Divider sx={{ borderColor: "rgba(148,163,184,0.18)" }} />
+
+                    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1 }}>
+                      <Box>
+                        <Typography sx={{ fontSize: 12, color: "rgba(148,163,184,0.9)" }}>Status summary</Typography>
+                        <Typography sx={{ fontSize: 13, fontWeight: 600 }}>
+                          Manage registrations in the Lifeguards tab.
+                        </Typography>
+                      </Box>
+                    </Box>
+                  </Stack>
+                </Box>
+              </Box>
             </Box>
           </Box>
         )}
 
         {tab === 4 && (
+          <Box>
+            <Typography sx={{ fontWeight: 800, fontSize: 20, mb: 3 }}>Lifeguards & Notifications</Typography>
+            <TelegramSettingsPanel api={API} />
+          </Box>
+        )}
+
+        {tab === 5 && (
           <VideoManager api={API} onReload={() => fetch(`${API}/api/zones/reload`, { method: "POST" }).catch(() => {})} />
         )}
       </Box>
