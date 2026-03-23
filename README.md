@@ -306,3 +306,30 @@ Contributions are welcome. If you want to contribute:
 This project is intended for academic and research use unless otherwise specified.
 
 If you want permissive open-source distribution, add an MIT `LICENSE` file at project root.
+
+## Screenshots & Demo
+
+Include clear visuals and a short demo to help reviewers and stakeholders quickly understand the system.
+
+- **Screenshots**: Add a `docs/screenshots/` folder and place annotated PNGs showing:
+  - Dashboard live monitoring (overview card grid)
+  - Fullscreen zone view with detections overlay
+  - Alert timeline and snapshot preview
+  - Lifeguards tab showing registered chat IDs and Stop/Resume buttons
+
+- **Demo video**: Add a short walkthrough (60–120s) to `docs/demo.mp4` or host on YouTube/Drive and link here. Suggested clips:
+  1. Start: system architecture & quick feature list (10s)
+  2. Live monitoring: show a zone with detections and an alert flow (30–45s)
+ 3. Lifeguard flow: register a chat ID, send a test alert, and pause/resume notifications (20–30s)
+ 4. Short conclusion & how to run locally (10–15s)
+
+- **Embedding**: If you host on YouTube, embed the link here using a direct URL and timestamp notes. Example:
+
+  Demo video (Host): https://youtu.be/your_demo_video_link
+
+- **Alt text & captions**: For each screenshot add a short caption and alt text for accessibility in `docs/screenshots/README.md`.
+
+Tips:
+- Use annotated screenshots (red boxes, arrows) to highlight detections and UI controls.
+- Keep the demo under two minutes for presentations; include timestamps in the description to jump to lifeguard/TG flows.
+- If you want, I can add placeholder image references and a demo video link entry in the README and create the `docs/screenshots/` folder.
