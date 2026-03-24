@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="100%" height="100%" fill="#0f172a"/>
+  <rect x="40" y="40" width="600" height="340" fill="#111827" stroke="#334155" stroke-width="2" rx="8"/>
+  <rect x="660" y="40" width="580" height="340" fill="#111827" stroke="#334155" stroke-width="2" rx="8"/>
+  <rect x="40" y="400" width="600" height="260" fill="#111827" stroke="#334155" stroke-width="2" rx="8"/>
+  <rect x="660" y="400" width="580" height="260" fill="#111827" stroke="#334155" stroke-width="2" rx="8"/>
+  <text x="640" y="360" fill="#94a3b8" font-family="Arial, sans-serif" font-size="20" text-anchor="middle">Placeholder dashboard screenshot</text>
+  <text x="640" y="390" fill="#94a3b8" font-family="Arial, sans-serif" font-size="14" text-anchor="middle">Replace with an annotated PNG showing detections and UI</text>
+</svg>
