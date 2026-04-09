@@ -31,12 +31,16 @@ AI-powered coastal surveillance system for **multi-zone beach monitoring**, **dr
 
 CoastVision is an end-to-end coastal/pool safety monitoring project designed to support lifeguards and safety teams. It ingests zone-wise video feeds, runs **YOLO-based detection**, serves annotated streams, and provides a dashboard for **monitoring, analytics, and alert workflows**.
 
-**Build snapshot (as documented in `COASTVISION_MASTER_GUIDE.md`, March 2026):**
-- **HLS-first streaming** with automatic fallback to MJPEG and single-frame polling
-- Dedicated **Lifeguards** tab in the React dashboard for Telegram operations
-- Telegram controls: **Add / Test / Stop(Pause) / Resume / Remove**
-- Zone-specific routing enforced by lifeguard ID pattern: `lifeguard_<zoneId>`
-- Telegram registrations + pause state persisted in `data/telegram_users.json`
+**Production-Ready Build (March 2026):**
+- ✅ **HLS-first streaming** with automatic fallback to MJPEG and single-frame polling
+- ✅ Dedicated **Lifeguards** tab in the React dashboard for Telegram operations
+- ✅ Telegram controls: **Add / Test / Stop(Pause) / Resume / Remove** per-lifeguard
+- ✅ Zone-specific routing enforced by lifeguard ID pattern: `lifeguard_<zoneId>`
+- ✅ Telegram registrations + persistent pause state in `data/telegram_users.json`
+- ✅ Per-lifeguard error logging and diagnostic reporting
+- ✅ Crowd density monitoring with threshold alerts
+- ✅ Analytics dashboard with person count timelines and event history
+- ✅ Full API suite for monitoring, alerts, and lifeguard operations
 
 ---
 
@@ -269,12 +273,27 @@ Other docs:
 
 ---
 
-## Roadmap
+## Completed Features
 
-- Improve event-level drowning behavior modeling beyond single-frame detection
+✅ **Multi-zone live monitoring** with detection overlays  
+✅ **HLS/MJPEG streaming** with automatic fallback chain  
+✅ **Lifeguard registration** with zone assignment  
+✅ **Telegram integration** (register, test, pause, resume per-lifeguard)  
+✅ **Alert generation** with image snapshots and logs  
+✅ **Analytics dashboard** (person count, zone activity, event history)  
+✅ **Crowd density monitoring** with configurable thresholds  
+✅ **Error diagnostics** and per-lifeguard status reporting  
+✅ **Custom zone naming** and persistent settings  
+✅ **Comprehensive API suite** for all operations  
+
+## Future Enhancements
+
+- Improve event-level drowning behavior modeling (multi-frame analysis)
 - Add richer incident triage and priority scoring
-- Deployment packaging for production setup
-- Strengthen test coverage (backend + dashboard integration)
+- Production deployment packaging (Docker, Kubernetes)
+- Expand test coverage (unit + integration tests)
+- Real-time streaming input support (RTSP, HLS, RTMP sources)
+- Multi-model inference (pose estimation, anomaly detection)
 
 ---
 
