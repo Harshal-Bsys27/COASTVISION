@@ -14,6 +14,7 @@ AI-powered coastal surveillance system for **multi-zone beach monitoring**, **dr
 
 - [Overview](#overview)
 - [Key Capabilities](#key-capabilities)
+- [Demo Video](#demo-video)
 - [System Architecture](#system-architecture)
 - [Screenshots](#screenshots)
 - [Project Structure](#project-structure)
