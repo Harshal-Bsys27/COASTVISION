@@ -66,6 +66,12 @@ CoastVision is an end-to-end coastal/pool safety monitoring project designed to 
 
 ---
 
+## Demo Video
+
+- [![Watch the demo video here](https://img.youtube.com/vi/mvWzru49PcA/hqdefault.jpg)](https://youtu.be/mvWzru49PcA)
+  ---
+  
+
 ## System Architecture
 
 ```text
