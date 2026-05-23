@@ -1,6 +1,6 @@
 # CoastVision
 
-AI-powered coastal surveillance system for **multi-zone beach monitoring**, **drowning-risk detection**, and **real-time alerting** — built with a **Flask + YOLO** backend and a **React (Vite) dashboard**.
+AI-powered coastal surveillance system for **multi-zone beach monitoring**, **drowning-risk detection**, and **real-time alerting** — built with a **Flask + YOLO** backend and a **React (Vite) dashboard**.Currently under progress for a upgradation of model accuracy and better optimization on diverse dataset
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Flask](https://img.shields.io/badge/Backend-Flask-black)
