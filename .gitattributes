@@ -1,0 +1,24 @@
+* text=auto
+*.sh text
+*.py text
+*.js text
+*.jsx text
+*.ts text
+*.tsx text
+*.css text
+*.html text
+*.md text
+*.yml text
+*.yaml text
+
+# Binary assets
+*.pt binary
+*.mp4 binary
+*.mkv binary
+*.avi binary
+*.mov binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.db binary
+*.pkl binary

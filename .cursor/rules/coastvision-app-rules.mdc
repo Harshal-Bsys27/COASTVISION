@@ -1,0 +1,145 @@
+---
+description: Production standards for CoastVision React Native mobile app — architecture, API layer, performance, and code clarity (based on project plan Part 3).
+globs:
+  - frontend/mobile/**
+  - frontend/shared/**
+alwaysApply: false
+---
+
+# CoastVision React Native — Production Coding Rules
+
+These rules apply when building or editing the CoastVision Android app (`frontend/mobile/`) and shared client code (`frontend/shared/`).
+
+## 1. Project Structure (Mandatory)
+
+Never put the whole app in one file. Match this layout:
+
+**Do:** one screen per file, reusable hooks, shared API factory.
+**Don't:** 2000-line App.js, inline fetch in JSX, duplicated poll logic.
+
+## 2. Layer Separation
+
+| Layer | Responsibility | Must NOT contain |
+|-------|----------------|------------------|
+| `shared/api.js` | HTTP requests, URL builders | React hooks, UI, AsyncStorage |
+| `context/ApiContext.js` | Base URL state, createApi provider | Screen-specific UI |
+| `hooks/` | Polling, app lifecycle, derived state | JSX, StyleSheet |
+| `screens/` | Compose components, wire hooks | Raw fetch strings |
+| `components/` | Display props, emit events | Direct API calls |
+
+All network access goes through `createApi(baseUrl)`. Screens use `useApi()` from context — never hardcode `http://192.168.x.x:8000` outside Settings.
+
+## 3. API Layer Rules
+
+- Single factory `createApi(baseUrl)` in `shared/api.js`
+- Normalize baseUrl: trim whitespace, strip trailing `/`
+- Every method throws on non-2xx status
+- `hlsUrl(zid)` returns a string — it is not a fetch call
+- New endpoints are added only in `api.js`, never in screens
+
+## 4. Server URL & Connection
+
+- Persist URL in AsyncStorage under one key: `coastvision_api_url`
+- Settings screen: URL input, Test Connection, save, green/red status dot
+- Show `ConnectionBanner` on all tabs when backend is unreachable
+- Validate `http://` or `https://` before saving
+- No hardcoded laptop IPs in screen files
+
+## 5. Screen Conventions
+
+| Screen | File | Key behavior |
+|--------|------|--------------|
+| Dashboard | `DashboardScreen.js` | FlatList zone cards, HLS, pull-to-refresh |
+| Analytics | `AnalyticsScreen.js` | Lazy sub-tabs; charts load on tab focus |
+| Event Logs | `EventLogsScreen.js` | Activity events + Respond action |
+| Settings | `SettingsScreen.js` | Profile, server URL, health check, sign out |
+
+- 4 bottom tabs via `@react-navigation/bottom-tabs` (Dashboard, Analytics, Logs, Settings)
+- Lifeguard accounts managed on **web admin** only — no mobile Lifeguards tab
+- Zone detail in separate `ZoneDetailScreen.js` (stack, not inline modal)
+- Max ~250 lines per screen — extract into `components/`
+
+## 6. Performance (Battery & Wi-Fi)
+
+- Pause polling when app is backgrounded (`AppState`)
+- Pause polling when tab is not focused (`useIsFocused`)
+- Lazy-load Analytics — fetch only when user opens that sub-tab
+- Poll intervals live in `constants.js`:
+
+| Data | Interval | Scope |
+|------|----------|-------|
+| Health | 5s | Settings / status |
+| Zones | 2s | Dashboard tab only |
+| Detections | 1.5s | Visible zone cards only |
+| Alerts | 3s | Event Logs tab only |
+| Analytics | On focus | No background polling |
+
+- HLS via `react-native-video` only — no parallel MJPEG + frame polling
+- Use `FlatList` with `keyExtractor` and `React.memo` on list items
+- Cancel requests on unmount (`AbortController` in hooks)
+
+## 7. UI & Components
+
+- Use `react-native-paper` for buttons, cards, inputs, snackbars
+- Components are presentational — props in, events out
+- `StyleSheet.create` at file bottom or shared `theme.js`
+- No magic numbers — use named constants
+- Drowning alerts use distinct severity colors from `constants.js`
+
+## 8. Error Handling & UX
+
+- try/catch on all async loads; show `Snackbar`, not stack traces
+- `ActivityIndicator` on first load; empty states with helpful text
+- Pull-to-refresh on Dashboard and Analytics
+- Network error message: "Cannot reach server — check Wi-Fi and URL in Settings"
+- Video errors on `ZoneCard` must not crash the list
+
+## 9. Alerts & Notifications
+
+- Centralize in `hooks/useAlertNotifications.js`
+- `expo-av` for sound, `expo-haptics` for vibration on drowning alerts
+- Track `lastSeenAlertId` to avoid repeat alarms on every poll
+- Unread badge on Event Logs tab
+
+## 10. Code Clarity & Naming
+
+- PascalCase: `ZoneCard.js`, `DashboardScreen.js`
+- camelCase hooks: `usePollApi.js`
+- UPPER_SNAKE constants: `POLL_ZONES_MS`
+- verb-first functions: `fetchZones`, `testConnection`
+- One default export per file
+- Comments only for non-obvious logic (SSE, HLS retry)
+
+## 11. What Not to Do
+
+- Do not copy web `App.jsx` as a mobile monolith
+- Do not import from `frontend/web/` — share via `frontend/shared/` only
+- Do not store secrets (Telegram bot token) in the mobile app
+- Do not poll all endpoints globally at app root
+- Do not use `console.log` as the only error path in production code
+
+## 12. New Feature Checklist
+
+1. Endpoint in `shared/api.js`?
+2. UI in `components/`, wired in screen?
+3. Repeated logic in `hooks/`?
+4. Constants in `shared/constants.js`?
+5. Server URL from `ApiContext`?
+6. 20+ items → `FlatList`, not `ScrollView.map`?
+7. Interval fetch → `usePollApi` with focus/AppState?
+
+## 13. Approved Dependencies
+
+expo, react-native, @react-navigation/native, @react-navigation/bottom-tabs,
+react-native-video, react-native-chart-kit, react-native-svg,
+@react-native-async-storage/async-storage, react-native-paper, expo-av, expo-haptics
+
+Do not add new libraries without a documented reason.
+
+## 14. Refactor Triggers
+
+Stop and refactor when:
+- Any screen exceeds 250 lines
+- Any component exceeds 150 lines
+- The same API path appears in more than one file
+- `setInterval` is written outside `usePollApi`
