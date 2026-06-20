@@ -13,6 +13,7 @@ import AnalyticsScreen from "../screens/AnalyticsScreen";
 import EventLogsScreen from "../screens/EventLogsScreen";
 import SettingsScreen from "../screens/SettingsScreen";
 import SignInScreen from "../screens/SignInScreen";
+import LandingScreen from "../screens/LandingScreen";
 import ZoneDetailScreen from "../screens/ZoneDetailScreen";
 import { colors, layout } from "../theme";
 
@@ -109,6 +110,7 @@ function MainTabNavigator() {
 function AuthNavigator() {
   return (
     <AuthStack.Navigator screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.background } }}>
+      <AuthStack.Screen name="Landing" component={LandingScreen} />
       <AuthStack.Screen name="SignIn" component={SignInScreen} />
     </AuthStack.Navigator>
   );
