@@ -39,6 +39,7 @@ import torch
 from flask import Flask, Response, abort, jsonify, request
 from flask_cors import CORS
 from ultralytics import YOLO
+from flask_socketio import SocketIO, emit
 
 # Import Telegram notification system
 from telegram_notify import notifier
@@ -566,6 +567,21 @@ def _broadcast_alert_to_lifeguards(alert: dict):
                     print(f"[telegram] Error sending alert to {tg_lg_id}: {e}")
     except Exception as e:
         print(f"[telegram] Routing error: {e}")
+    
+    # NEW: Broadcast to WebSocket clients (dashboard + mobile app) for real-time sync
+    try:
+        # socketio.emit broadcasts to all clients by default when called outside a handler
+        socketio.emit('new_alert', {
+            'alert_id': alert_id,
+            'zone': zone,
+            'type': detection_type,
+            'confidence': float(confidence),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'label': detection_type,
+        })
+        print(f"[WS] Alert broadcast: {alert_id} ({detection_type})")
+    except Exception as e:
+        print(f"[WS] Broadcast error: {e}")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -1354,6 +1370,24 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024 * 1024  # 10 GB max upload
 CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+# Initialize WebSocket for real-time dashboard updates
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', ping_timeout=60, ping_interval=25)
+print("[init] WebSocket initialized for real-time alert broadcasting")
+
+@socketio.on('connect')
+def handle_connect(auth=None):
+    """Handle WebSocket client connection"""
+    client_type = 'unknown'
+    if auth:
+        client_type = auth.get('client_type', 'unknown')
+    print(f"[WS] Client connected (type={client_type})")
+    emit('connection_response', {'data': 'Connected to CoastVision backend'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Handle WebSocket client disconnection"""
+    print("[WS] Client disconnected")
 
 
 @app.errorhandler(413)
@@ -2549,6 +2583,7 @@ if __name__ == "__main__":
     #   .\run_backend.ps1  (Waitress + correct venv python)
     host = os.environ.get("COASTVISION_HOST", "127.0.0.1")
     port = int(os.environ.get("COASTVISION_PORT", "8000"))
-    print(f"[main] Starting Flask dev server on http://{host}:{port} (device={DEVICE})")
+    print(f"[main] Starting Flask server with WebSocket support on http://{host}:{port} (device={DEVICE})")
+    print("[main] WebSocket enabled for real-time dashboard updates")
     print("[main] Tip: use run_backend.ps1 for production-like serving.")
-    app.run(host=host, port=port, threaded=True)
+    socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
