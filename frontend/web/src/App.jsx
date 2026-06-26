@@ -1,5 +1,6 @@
 ﻿import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
+import useRealtimeUpdates from './hooks/useRealtimeUpdates';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -2364,6 +2365,32 @@ export default function App() {
     }
   }, [openZone]);
 
+  // WebSocket real-time updates for instant alert broadcasting
+  const [wsAlerts, setWsAlerts] = useState([]);
+  const [wsConnected, setWsConnected] = useState(false);
+  
+  const { isConnected } = useRealtimeUpdates(
+    (alert) => {
+      // New alert received via WebSocket - add to top of list
+      setWsAlerts(prev => [alert, ...prev.slice(0, 119)]);
+      console.log('[Dashboard] New WebSocket alert:', alert);
+    },
+    (zoneData) => {
+      // Zone update received via WebSocket
+      console.log('[Dashboard] Zone update:', zoneData);
+    },
+    (response) => {
+      // Lifeguard response received via WebSocket
+      console.log('[Dashboard] Lifeguard response:', response);
+    },
+    null,
+    API // Pass backend URL
+  );
+  
+  useEffect(() => {
+    setWsConnected(isConnected);
+  }, [isConnected]);
+
   const alerts = usePollJson(`${API}/api/alerts?limit=120`, 1000, true, { items: [] });
   const analysis = usePollJson(`${API}/api/analysis`, 1500, true, { alerts_total: 0, alerts_by_zone: {}, alerts_by_label: {} });
 
@@ -2587,6 +2614,24 @@ export default function App() {
               label={`${zones.length} Zones`}
               sx={{ bgcolor: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.75)", fontWeight: 700, fontSize: 13, height: 40, px: 1.5, border: "1.5px solid rgba(255,255,255,0.12)", borderRadius: "10px" }}
             />
+            {/* WebSocket Live Status Indicator */}
+            <Tooltip title={wsConnected ? "Live WebSocket connected - real-time alerts" : "WebSocket connecting..."}>
+              <Chip
+                icon={<FiberManualRecordIcon sx={{ fontSize: 12, animation: wsConnected ? "pulse 1s infinite" : "none", "@keyframes pulse": { "0%, 100%": { opacity: 1 }, "50%": { opacity: 0.5 } } }} />}
+                label={wsConnected ? "Live" : "Connecting"}
+                sx={{ 
+                  bgcolor: wsConnected ? "rgba(76,175,80,0.15)" : "rgba(255,193,7,0.15)", 
+                  color: wsConnected ? "#4caf50" : "#ffc107", 
+                  fontWeight: 700, 
+                  fontSize: 13, 
+                  height: 40, 
+                  px: 1.5, 
+                  border: `1.5px solid ${wsConnected ? "rgba(76,175,80,0.3)" : "rgba(255,193,7,0.3)"}`, 
+                  borderRadius: "10px", 
+                  "& .MuiChip-icon": { color: wsConnected ? "#4caf50" : "#ffc107" } 
+                }}
+              />
+            </Tooltip>
           </Stack>
 
           <Box sx={{ flex: 1 }} />
