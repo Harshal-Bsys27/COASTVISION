@@ -68,6 +68,7 @@ import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import TrendingUpIcon from "@mui/icons-material/TrendingUp";
 import VideoLibraryIcon from "@mui/icons-material/VideoLibrary";
 import DeleteIcon from "@mui/icons-material/Delete";
+import PhotoCameraIcon from "@mui/icons-material/PhotoCamera";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import EditIcon from "@mui/icons-material/Edit";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
@@ -1383,6 +1384,400 @@ function LifeguardItem({ lg, onRegister, onUnregister, onTest, onPauseToggle, is
   );
 }
 
+function LifeguardRegistrationPanel({ api, zones, zoneNames }) {
+  const [lifeguards, setLifeguards] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [assignInputs, setAssignInputs] = useState({});
+  const [avatarPreviews, setAvatarPreviews] = useState({});
+  const [uploadingAvatarId, setUploadingAvatarId] = useState(null);
+  const [message, setMessage] = useState("");
+  const [avatarModal, setAvatarModal] = useState({ open: false, url: "" });
+  const [saving, setSaving] = useState(false);
+  const [assigningId, setAssigningId] = useState(null);
+  const fileInputsRef = useRef({});
+
+  const normalizeZones = useCallback((value) => {
+    return String(value)
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => Number(entry))
+      .filter((z) => Number.isFinite(z));
+  }, []);
+
+  const loadLifeguards = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(`${api}/api/lifeguards`, { cache: "no-store" });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        const errorText = `Failed to load lifeguards: ${response.status} ${response.statusText} ${body}`;
+        console.error(errorText);
+        showMessage(errorText);
+        setLifeguards([]);
+        return;
+      }
+      const data = await response.json();
+      setLifeguards(Array.isArray(data.lifeguards) ? data.lifeguards : []);
+    } catch (error) {
+      console.error("Failed to load lifeguards:", error);
+      showMessage(`Failed to load lifeguards: ${error.message}`);
+      setLifeguards([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    loadLifeguards();
+  }, [loadLifeguards]);
+
+  useEffect(() => {
+    const defaults = {};
+    for (const lg of lifeguards) {
+      defaults[lg.id] = Array.isArray(lg.zones) && lg.zones.length > 0 ? lg.zones.join(", ") : "";
+    }
+    setAssignInputs(defaults);
+  }, [lifeguards]);
+
+  const showMessage = (text) => {
+    setMessage(text);
+    if (!text) return;
+    window.setTimeout(() => setMessage(""), 4000);
+  };
+
+  const handleRegister = async () => {
+    if (!name.trim() || !phone.trim()) {
+      showMessage("Name and phone are required to register a mobile lifeguard.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const response = await fetch(`${api}/api/lifeguards/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim(), phone: phone.trim() }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Could not register lifeguard");
+      }
+      setName("");
+      setPhone("");
+      showMessage("Lifeguard account created. The lifeguard can now login from the mobile app.");
+      await loadLifeguards();
+    } catch (error) {
+      showMessage(`Error: ${error.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAssign = async (lgId) => {
+    const raw = assignInputs[lgId] || "";
+    const zonesToAssign = normalizeZones(raw);
+    setAssigningId(lgId);
+    try {
+      const response = await fetch(`${api}/api/lifeguards/${encodeURIComponent(lgId)}/assign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ zones: zonesToAssign }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Could not assign zones");
+      }
+      showMessage(`Assigned zones ${zonesToAssign.length ? zonesToAssign.join(", ") : "ALL"} to lifeguard.`);
+      await loadLifeguards();
+    } catch (error) {
+      showMessage(`Error: ${error.message}`);
+    } finally {
+      setAssigningId(null);
+    }
+  };
+
+  const handleDelete = async (lgId) => {
+    if (!window.confirm("Delete this lifeguard?")) return;
+    try {
+      const response = await fetch(`${api}/api/lifeguards/${encodeURIComponent(lgId)}`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Could not delete lifeguard");
+      }
+      showMessage("Lifeguard removed.");
+      await loadLifeguards();
+    } catch (error) {
+      showMessage(`Error: ${error.message}`);
+    }
+  };
+
+  const handleChooseAvatar = (lgId) => {
+    fileInputsRef.current[lgId]?.click();
+  };
+
+  const handleAvatarChange = async (lgId, event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const previewUrl = URL.createObjectURL(file);
+    setAvatarPreviews((prev) => ({ ...prev, [lgId]: previewUrl }));
+    setUploadingAvatarId(lgId);
+
+    try {
+      const formData = new FormData();
+      formData.append("avatar", file);
+
+      const response = await fetch(`${api}/api/lifeguards/${encodeURIComponent(lgId)}/avatar`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Upload failed");
+      }
+      showMessage("Profile picture updated.");
+      await loadLifeguards();
+    } catch (error) {
+      showMessage(`Error: ${error.message}`);
+    } finally {
+      setUploadingAvatarId(null);
+    }
+  };
+
+  const setAssignValue = (lgId, value) => {
+    setAssignInputs((prev) => ({ ...prev, [lgId]: value }));
+  };
+
+  return (
+    <Box sx={{ p: 3, borderRadius: 3, bgcolor: "#0b1623", border: "1px solid rgba(94,234,212,0.14)", boxShadow: "0 14px 34px rgba(2,6,23,0.42)", backgroundImage: "linear-gradient(135deg, rgba(45,212,191,0.08), rgba(8,47,73,0.16) 45%, rgba(11,22,35,0.96) 90%)", gridColumn: { md: "span 2" }, opacity: 0, transform: "translateY(10px)", animation: "lifeguardPanelIn 380ms cubic-bezier(0.22, 1, 0.36, 1) forwards", "@keyframes lifeguardPanelIn": { "0%": { opacity: 0, transform: "translateY(10px)" }, "100%": { opacity: 1, transform: "translateY(0)" } } }}>
+      <Typography sx={{ fontWeight: 800, mb: 2, color: "#99f6e4", fontSize: 22, letterSpacing: 0.3, fontFamily: "Manrope, Poppins, Segoe UI, sans-serif" }}>Mobile App Lifeguards</Typography>
+      <Stack spacing={3}>
+        <Box sx={{ p: 3, borderRadius: 3, bgcolor: "rgba(9,20,33,0.9)", border: "1px solid rgba(125,211,252,0.2)", boxShadow: "inset 0 0 0 1px rgba(186,230,253,0.07), 0 8px 20px rgba(2,6,23,0.24)" }}>
+          <Stack spacing={3}>
+            <Box>
+              <Typography sx={{ fontSize: 19, fontWeight: 800, color: "#f8fafc", mb: 1, letterSpacing: 0.2, fontFamily: "Manrope, Poppins, Segoe UI, sans-serif" }}>Register Lifeguard</Typography>
+              <Typography sx={{ fontSize: 14, color: "rgba(226,232,240,0.86)", lineHeight: 1.65, maxWidth: 760 }}>
+                Create a polished responder profile, map zones quickly, and keep mobile login ready using the registered phone number.
+              </Typography>
+            </Box>
+
+            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr auto" }, gap: 2, alignItems: "center" }}>
+              <TextField
+                label="Full name"
+                size="small"
+                fullWidth
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                InputLabelProps={{ sx: { color: "rgba(148,163,184,0.9)", fontSize: 13 } }}
+                sx={{
+                  minWidth: 0,
+                  "& .MuiOutlinedInput-root": {
+                    bgcolor: "rgba(0,0,0,0.22)",
+                    minHeight: 48,
+                    color: "#fff",
+                    "& fieldset": { borderColor: "rgba(148,163,184,0.25)" },
+                    "&:hover fieldset": { borderColor: "#2dd4bf" },
+                    "&.Mui-focused fieldset": { borderColor: "#2dd4bf" },
+                  },
+                  "& .MuiOutlinedInput-input": { color: "#fff", fontSize: 14, px: 1 },
+                }}
+              />
+              <TextField
+                label="Phone number"
+                size="small"
+                fullWidth
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="+1234567890"
+                InputLabelProps={{ sx: { color: "rgba(148,163,184,0.9)", fontSize: 13 } }}
+                sx={{
+                  minWidth: 0,
+                  "& .MuiOutlinedInput-root": {
+                    bgcolor: "rgba(0,0,0,0.22)",
+                    minHeight: 48,
+                    color: "#fff",
+                    "& fieldset": { borderColor: "rgba(148,163,184,0.25)" },
+                    "&:hover fieldset": { borderColor: "#2dd4bf" },
+                    "&.Mui-focused fieldset": { borderColor: "#2dd4bf" },
+                  },
+                  "& .MuiOutlinedInput-input": { color: "#fff", fontSize: 14, px: 1 },
+                }}
+                helperText="Example: +1234567890"
+              />
+              <Button
+                variant="contained"
+                onClick={handleRegister}
+                disabled={saving || !name.trim() || !phone.trim()}
+                sx={{ width: { xs: "100%", sm: 170 }, bgcolor: "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 100%)", color: "#071520", fontWeight: 700, textTransform: "none", minHeight: 46, fontSize: 14 }}
+              >
+                {saving ? "Registering..." : "Register Lifeguard"}
+              </Button>
+            </Box>
+          </Stack>
+        </Box>
+
+        {message && (
+          <Typography sx={{ fontSize: 12, color: message.startsWith("Error") ? "#ef4444" : "#34d399", p: 1.5, bgcolor: message.startsWith("Error") ? "rgba(239,68,68,0.14)" : "rgba(52,211,153,0.12)", borderRadius: 1.5 }}>
+            {message}
+          </Typography>
+        )}
+
+        {loading ? (
+          <Typography sx={{ color: "rgba(255,255,255,0.5)", textAlign: "center", py: 4 }}>Loading lifeguards...</Typography>
+        ) : lifeguards.length === 0 ? (
+          <Typography sx={{ color: "rgba(255,255,255,0.5)", py: 4 }}>No mobile lifeguard accounts created yet.</Typography>
+        ) : (
+          <Box sx={{ display: "grid", gap: 2.25, gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" } }}>
+            {lifeguards.map((lg, index) => (
+              <Box
+                key={lg.id}
+                sx={{
+                  p: 2.75,
+                  borderRadius: 3,
+                  bgcolor: "#0d1826",
+                  border: "1px solid rgba(56,189,248,0.2)",
+                  boxShadow: "0 22px 40px rgba(0,0,0,0.28)",
+                  backgroundImage: "linear-gradient(140deg, rgba(56,189,248,0.1), rgba(45,212,191,0.05) 42%, rgba(13,24,38,0.95) 85%)",
+                  opacity: 0,
+                  transform: "translateY(14px) scale(0.986)",
+                  animation: `lifeguardCardIn 460ms cubic-bezier(0.22, 1, 0.36, 1) ${index * 65}ms forwards`,
+                  transition: "transform 0.24s ease, box-shadow 0.24s ease, border-color 0.24s ease",
+                  "&:hover": {
+                    transform: "translateY(-2px)",
+                    boxShadow: "0 26px 44px rgba(0,0,0,0.35)",
+                    borderColor: "rgba(103,232,249,0.34)",
+                  },
+                  "@keyframes lifeguardCardIn": {
+                    "0%": { opacity: 0, transform: "translateY(14px) scale(0.986)" },
+                    "100%": { opacity: 1, transform: "translateY(0) scale(1)" },
+                  },
+                }}
+              >
+                <Stack spacing={2}>
+                  <Box sx={{ display: "flex", gap: 2, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+                    <Box sx={{ display: "flex", gap: 2, alignItems: "center", minWidth: 0, flex: 1 }}>
+                      <Avatar
+                        src={avatarPreviews[lg.id] || lg.avatar_thumb || lg.avatar || lg.avatarUrl || lg.photo || ""}
+                        onClick={() => setAvatarModal({ open: true, url: avatarPreviews[lg.id] || lg.avatar || lg.avatarUrl || lg.photo || "" })}
+                        sx={{ width: 64, height: 64, bgcolor: "rgba(8,32,58,0.92)", color: "#67e8f9", fontSize: 24, cursor: 'pointer', border: "1px solid rgba(103,232,249,0.4)", boxShadow: "0 8px 20px rgba(14,116,144,0.35)" }}
+                      >
+                        {!avatarPreviews[lg.id] && !lg.avatar && !lg.avatar_thumb && !lg.avatarUrl && !lg.photo && <PersonIcon sx={{ fontSize: 26 }} />}
+                      </Avatar>
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography sx={{ fontSize: 21, fontWeight: 800, color: "#f8fafc", lineHeight: 1.2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{lg.name || "Unnamed lifeguard"}</Typography>
+                        <Typography sx={{ fontSize: 13, fontWeight: 700, color: "rgba(186,230,253,0.92)", mt: 0.4 }}>{`Lifeguard ${index + 1} : Mobile Responder`}</Typography>
+                      </Box>
+                    </Box>
+                    <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ alignItems: "center", justifyContent: { xs: "flex-start", sm: "flex-end" } }}>
+                      <Chip label={`#${index + 1}`} size="small" sx={{ color: "#bae6fd", borderColor: "rgba(125,211,252,0.32)", bgcolor: "rgba(3,105,161,0.22)", fontSize: 12, height: 30, px: 0.75, fontWeight: 700 }} />
+                      <Chip label={`ID ${lg.id}`} size="small" sx={{ color: "#ccfbf1", borderColor: "rgba(45,212,191,0.3)", bgcolor: "rgba(13,148,136,0.22)", fontSize: 12, height: 30, px: 0.75, fontWeight: 700 }} />
+                      <IconButton
+                        aria-label="Upload avatar"
+                        size="small"
+                        onClick={() => handleChooseAvatar(lg.id)}
+                        sx={{ bgcolor: "rgba(14,116,144,0.2)", color: "#67e8f9", border: "1px solid rgba(103,232,249,0.24)", minWidth: 32, minHeight: 32 }}
+                      >
+                        <PhotoCameraIcon sx={{ fontSize: 18 }} />
+                      </IconButton>
+                      <IconButton
+                        aria-label="Delete lifeguard"
+                        size="small"
+                        onClick={() => handleDelete(lg.id)}
+                        sx={{ bgcolor: "rgba(127,29,29,0.2)", color: "#fca5a5", border: "1px solid rgba(248,113,113,0.24)", minWidth: 32, minHeight: 32 }}
+                      >
+                        <DeleteIcon sx={{ fontSize: 18 }} />
+                      </IconButton>
+                    </Stack>
+                  </Box>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    ref={(ref) => {
+                      if (ref) {
+                        fileInputsRef.current[lg.id] = ref;
+                      }
+                    }}
+                    onChange={(e) => handleAvatarChange(lg.id, e)}
+                    style={{ display: "none" }}
+                  />
+                  <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "repeat(2, 1fr)", md: "repeat(3, 1fr)" }, gap: 1.25 }}>
+                    <Box sx={{ p: 1.6, borderRadius: 3, bgcolor: "rgba(14,116,144,0.16)", border: "1px solid rgba(103,232,249,0.2)" }}>
+                      <Typography sx={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 0.8, color: "rgba(186,230,253,0.9)", mb: 0.6, fontWeight: 700 }}>Status</Typography>
+                      <Typography sx={{ fontSize: 17, color: lg.online ? "#86efac" : "#f8fafc", fontWeight: 800, lineHeight: 1.25 }}>{lg.online ? "Online" : "Offline"}</Typography>
+                    </Box>
+                    <Box sx={{ p: 1.6, borderRadius: 3, bgcolor: "rgba(13,148,136,0.16)", border: "1px solid rgba(94,234,212,0.2)" }}>
+                      <Typography sx={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 0.8, color: "rgba(153,246,228,0.9)", mb: 0.6, fontWeight: 700 }}>Zones</Typography>
+                      <Typography sx={{ fontSize: 16, color: "#f1f5f9", lineHeight: 1.45, fontWeight: 700 }}>
+                        {Array.isArray(lg.zones) && lg.zones.length > 0 ? lg.zones.join(", ") : "All zones"}
+                      </Typography>
+                    </Box>
+                    <Box sx={{ p: 1.6, borderRadius: 3, bgcolor: "rgba(30,64,175,0.16)", border: "1px solid rgba(147,197,253,0.2)" }}>
+                      <Typography sx={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 0.8, color: "rgba(191,219,254,0.9)", mb: 0.6, fontWeight: 700 }}>Login ID</Typography>
+                      <Typography sx={{ fontSize: 16, color: "#f1f5f9", lineHeight: 1.45, fontWeight: 700 }}>{lg.phone || "No login ID"}</Typography>
+                    </Box>
+                  </Box>
+                  <Typography sx={{ fontSize: 14, color: "rgba(226,232,240,0.82)", fontWeight: 600 }}>
+                    {lg.last_seen ? `Last seen ${new Date(lg.last_seen * 1000).toLocaleString()}` : "No recent activity"}
+                  </Typography>
+                  <Box sx={{ display: "grid", gap: 1, gridTemplateColumns: { xs: "1fr", sm: "minmax(150px, 1fr) auto" }, alignItems: "start" }}>
+                    <TextField
+                      label="Zone IDs"
+                      size="small"
+                      fullWidth
+                      value={assignInputs[lg.id] ?? ""}
+                      onChange={(e) => setAssignValue(lg.id, e.target.value)}
+                      placeholder="e.g. 1,2,3"
+                      InputLabelProps={{ sx: { color: "rgba(148,163,184,0.9)", fontSize: 12 } }}
+                      sx={{
+                        "& .MuiOutlinedInput-root": {
+                          bgcolor: "rgba(10,25,40,0.88)",
+                          minHeight: 44,
+                          color: "#fff",
+                          "& fieldset": { borderColor: "rgba(148,163,184,0.22)" },
+                          "&:hover fieldset": { borderColor: "#2dd4bf" },
+                          "&.Mui-focused fieldset": { borderColor: "#2dd4bf" },
+                        },
+                        "& .MuiOutlinedInput-input": { color: "#fff", fontSize: 14, px: 1 },
+                      }}
+                      helperText="Leave blank to assign all zones"
+                    />
+                    <Button
+                      variant="contained"
+                      onClick={() => handleAssign(lg.id)}
+                      disabled={assigningId === lg.id}
+                      sx={{ width: "100%", maxWidth: 88, bgcolor: "linear-gradient(135deg, #22c55e 0%, #16a34a 100%)", color: "#f8fafc", fontWeight: 700, textTransform: "none", minHeight: 30, fontSize: 11.5, borderRadius: 2, px: 1, justifySelf: "start", alignSelf: "start", mt: 0.1 }}
+                    >
+                      {assigningId === lg.id ? "Saving..." : "Save"}
+                    </Button>
+                  </Box>
+                </Stack>
+              </Box>
+            ))}
+          </Box>
+        )}
+      </Stack>
+      <Dialog open={avatarModal.open} onClose={() => setAvatarModal({ open: false, url: "" })} maxWidth="md">
+        <DialogTitle sx={{ m: 0, p: 1.5 }}>
+          <IconButton aria-label="close" onClick={() => setAvatarModal({ open: false, url: "" })} sx={{ position: 'absolute', right: 8, top: 8 }}>
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ p: 1 }}>
+          {avatarModal.url ? (
+            <Box component="img" src={avatarModal.url} alt="Avatar" sx={{ width: '100%', height: 'auto', display: 'block', borderRadius: 2 }} />
+          ) : (
+            <Typography sx={{ p: 2 }}>No image</Typography>
+          )}
+        </DialogContent>
+      </Dialog>
+    </Box>
+  );
+}
+
 // ===================== VIDEO MANAGER COMPONENT =====================
 function VideoManager({ api, onReload }) {
   const [videos, setVideos] = useState([]);
@@ -2178,6 +2573,7 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [openZone, setOpenZone] = useState(null);
   const [analyticsSection, setAnalyticsSection] = useState("overview");
+  const [lifeguardView, setLifeguardView] = useState("telegram");
   
   // Quick win states
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -2735,14 +3131,63 @@ export default function App() {
           </Button>
         </Toolbar>
 
-        {/* Tabs - Sleek dark strip with gold accent */}
-        <Box sx={{ background: "rgba(255,255,255,0.02)", borderRadius: { xs: 0, md: "0 0 14px 14px" }, borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+        {/* Tabs - Premium segmented navigation */}
+        <Box
+          sx={{
+            background: "linear-gradient(135deg, rgba(8,20,33,0.82), rgba(9,33,47,0.72))",
+            borderRadius: { xs: 0, md: "0 0 14px 14px" },
+            borderTop: "1px solid rgba(125,211,252,0.12)",
+            borderBottom: "1px solid rgba(45,212,191,0.12)",
+            boxShadow: "inset 0 1px 0 rgba(226,232,240,0.04)",
+          }}
+        >
           <Tabs
             value={tab}
             onChange={(_, v) => setTab(v)}
             textColor="inherit"
-            TabIndicatorProps={{ style: { background: "linear-gradient(90deg, transparent, #2dd4bf, transparent)", height: 2.5, borderRadius: 2 } }}
-            sx={{ px: { xs: 2, md: 5 }, minHeight: 52, "& .MuiTab-root": { minHeight: 52, textTransform: "none", fontWeight: 600, fontSize: 13.5, color: "rgba(255,255,255,0.35)", letterSpacing: 0.5, gap: 1.5, px: 3, mx: 0.5, my: 0.5, borderRadius: "10px", transition: "all 0.25s ease", "&:hover": { color: "rgba(255,255,255,0.75)", bgcolor: "rgba(255,255,255,0.04)" }, "&.Mui-selected": { color: "#5eead4", bgcolor: "rgba(45,212,191,0.08)", fontWeight: 700 } } }}
+            TabIndicatorProps={{
+              style: {
+                background: "linear-gradient(90deg, transparent, #67e8f9, #2dd4bf, transparent)",
+                height: 3,
+                borderRadius: 999,
+                boxShadow: "0 0 18px rgba(45,212,191,0.45)",
+              },
+            }}
+            sx={{
+              px: { xs: 1.5, md: 4.5 },
+              minHeight: 58,
+              "& .MuiTab-root": {
+                minHeight: 46,
+                textTransform: "none",
+                fontWeight: 700,
+                fontSize: 14,
+                fontFamily: "Manrope, Poppins, Segoe UI, sans-serif",
+                color: "rgba(226,232,240,0.62)",
+                letterSpacing: 0.35,
+                gap: 1.2,
+                px: { xs: 1.4, md: 2.5 },
+                mx: 0.45,
+                my: 0.7,
+                borderRadius: "11px",
+                border: "1px solid transparent",
+                transition: "all 0.22s ease",
+                "&:hover": {
+                  color: "#dbeafe",
+                  bgcolor: "rgba(14,116,144,0.18)",
+                  borderColor: "rgba(125,211,252,0.3)",
+                },
+                "& .MuiTab-iconWrapper": {
+                  marginRight: 1,
+                },
+                "&.Mui-selected": {
+                  color: "#ccfbf1",
+                  bgcolor: "rgba(13,148,136,0.22)",
+                  borderColor: "rgba(94,234,212,0.4)",
+                  boxShadow: "inset 0 1px 0 rgba(240,253,250,0.18), 0 6px 18px rgba(13,148,136,0.24)",
+                  fontWeight: 800,
+                },
+              },
+            }}
           >
             <Tab icon={<DashboardIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Dashboard" />
             <Tab icon={<AnalyticsIcon sx={{ fontSize: 19 }} />} iconPosition="start" label="Analytics" />
@@ -3516,8 +3961,84 @@ export default function App() {
 
         {tab === 4 && (
           <Box>
-            <Typography sx={{ fontWeight: 800, fontSize: 20, mb: 3 }}>Lifeguards & Notifications</Typography>
-            <TelegramSettingsPanel api={API} />
+            <Typography sx={{ fontWeight: 800, fontSize: 24, mb: 2.5, color: "#f8fafc", letterSpacing: 0.25, fontFamily: "Manrope, Poppins, Segoe UI, sans-serif" }}>Lifeguards & Notifications</Typography>
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={1.5}
+              sx={{
+                mb: 3,
+                p: 0.75,
+                borderRadius: 3,
+                bgcolor: "rgba(8,20,33,0.72)",
+                border: "1px solid rgba(125,211,252,0.16)",
+                width: "fit-content",
+                maxWidth: "100%",
+              }}
+            >
+              <Button
+                variant={lifeguardView === "telegram" ? "contained" : "outlined"}
+                onClick={() => setLifeguardView("telegram")}
+                sx={{
+                  textTransform: "none",
+                  fontWeight: 800,
+                  minHeight: 38,
+                  px: 2.2,
+                  borderRadius: 2.5,
+                  borderColor: "rgba(125,211,252,0.4)",
+                  color: lifeguardView === "telegram" ? "#062b33" : "#bae6fd",
+                  bgcolor: lifeguardView === "telegram" ? "transparent" : "rgba(14,116,144,0.14)",
+                  backgroundImage: lifeguardView === "telegram"
+                    ? "linear-gradient(135deg, #67e8f9 0%, #2dd4bf 100%)"
+                    : "none",
+                  boxShadow: lifeguardView === "telegram"
+                    ? "0 8px 24px rgba(45,212,191,0.35)"
+                    : "none",
+                  "&:hover": {
+                    borderColor: "rgba(103,232,249,0.65)",
+                    bgcolor: lifeguardView === "telegram" ? "transparent" : "rgba(14,116,144,0.24)",
+                    backgroundImage: lifeguardView === "telegram"
+                      ? "linear-gradient(135deg, #5eead4 0%, #22d3ee 100%)"
+                      : "none",
+                  },
+                }}
+              >
+                Telegram Registration
+              </Button>
+              <Button
+                variant={lifeguardView === "app" ? "contained" : "outlined"}
+                onClick={() => setLifeguardView("app")}
+                sx={{
+                  textTransform: "none",
+                  fontWeight: 800,
+                  minHeight: 38,
+                  px: 2.2,
+                  borderRadius: 2.5,
+                  borderColor: "rgba(125,211,252,0.4)",
+                  color: lifeguardView === "app" ? "#062b33" : "#bae6fd",
+                  bgcolor: lifeguardView === "app" ? "transparent" : "rgba(14,116,144,0.14)",
+                  backgroundImage: lifeguardView === "app"
+                    ? "linear-gradient(135deg, #67e8f9 0%, #2dd4bf 100%)"
+                    : "none",
+                  boxShadow: lifeguardView === "app"
+                    ? "0 8px 24px rgba(45,212,191,0.35)"
+                    : "none",
+                  "&:hover": {
+                    borderColor: "rgba(103,232,249,0.65)",
+                    bgcolor: lifeguardView === "app" ? "transparent" : "rgba(14,116,144,0.24)",
+                    backgroundImage: lifeguardView === "app"
+                      ? "linear-gradient(135deg, #5eead4 0%, #22d3ee 100%)"
+                      : "none",
+                  },
+                }}
+              >
+                Mobile App Lifeguards
+              </Button>
+            </Stack>
+            {lifeguardView === "telegram" ? (
+              <TelegramSettingsPanel api={API} />
+            ) : (
+              <LifeguardRegistrationPanel api={API} zones={zones} zoneNames={zoneNames} />
+            )}
           </Box>
         )}
 
