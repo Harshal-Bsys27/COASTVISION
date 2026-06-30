@@ -1,7 +1,8 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { Dimensions, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
+import { Dimensions, Pressable, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
 import { ActivityIndicator, Text } from "react-native-paper";
 import { BarChart, LineChart } from "react-native-chart-kit";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import ConnectionBanner from "../components/ConnectionBanner";
 import TabChipRow from "../components/TabChipRow";
 import { useApiContext } from "../context/ApiContext";
@@ -26,18 +27,18 @@ const chartConfig = {
   color: (opacity = 1) => `rgba(248, 250, 252, ${opacity})`,
   labelColor: (opacity = 1) => `rgba(226, 232, 240, ${opacity * 0.85})`,
   propsForDots: {
-    r: "4",
-    strokeWidth: "2",
+    r: "0",
+    strokeWidth: "0",
     stroke: colors.surface,
     fill: colors.primary,
   },
   propsForBackgroundLines: {
-    stroke: "rgba(148,163,184,0.14)",
-    strokeDasharray: "4",
+    stroke: "rgba(148,163,184,0.12)",
+    strokeDasharray: "3",
   },
   fillShadowGradient: colors.primary,
-  fillShadowGradientOpacity: 0.35,
-  barPercentage: 0.72,
+  fillShadowGradientOpacity: 0.55,
+  barPercentage: 0.65,
   useShadowColorFromDataset: true,
 };
 
@@ -108,6 +109,7 @@ export default function AnalyticsScreen() {
   const [crowdStatus, setCrowdStatus] = useState(null);
   const [crowdAlerts, setCrowdAlerts] = useState([]);
   const [crowdLastUpdated, setCrowdLastUpdated] = useState(null);
+  const [expandedZone, setExpandedZone] = useState(null);
   const [responseTimes, setResponseTimes] = useState(null);
   const [personCountZone, setPersonCountZone] = useState(null);
   const [personZoneOptions, setPersonZoneOptions] = useState([]);
@@ -121,6 +123,10 @@ export default function AnalyticsScreen() {
       })),
     [personZoneOptions]
   );
+
+  const toggleZoneDetails = useCallback((zoneId) => {
+    setExpandedZone((current) => (current === zoneId ? null : zoneId));
+  }, []);
 
   const loadPersonCountTimeline = useCallback(
     async (zone) => {
@@ -286,6 +292,7 @@ export default function AnalyticsScreen() {
       const rawDelta = threshold > 0 ? Math.round((count / threshold) * 100) : 0;
       const riskText = rawDelta >= 100 ? "Crowded" : rawDelta >= 75 ? "High" : rawDelta >= 50 ? "Medium" : "Safe";
       const colorIndex = index % ZONE_COLORS.length;
+      const band = rawDelta >= 100 ? "critical" : rawDelta >= 75 ? "warning" : "safe";
       return {
         id: zone.zone ?? zone.id,
         label: zone.zone_name || zone.name || `Zone ${zone.zone ?? zone.id}`,
@@ -296,6 +303,9 @@ export default function AnalyticsScreen() {
         crowdPressure: `${rawDelta}%`,
         pressureLabel: riskText,
         status: zone.status || (threshold > 0 && count >= threshold ? "crowded" : rawDelta >= 75 ? "warning" : "safe"),
+        band,
+        bandLabel: band === "critical" ? "Critical" : band === "warning" ? "Warning" : "Safe",
+        bandColor: band === "critical" ? colors.danger : band === "warning" ? colors.warning : colors.success,
         accent: ZONE_COLORS[colorIndex] || colors.primary,
       };
     });
@@ -338,8 +348,7 @@ export default function AnalyticsScreen() {
       .slice()
       .sort((a, b) => Number(b.person_count ?? b.count ?? 0) - Number(a.person_count ?? a.count ?? 0));
 
-    const dataPoints = sorted.map((z) => Number(z.person_count ?? z.count ?? 0));
-    const thresholdPoints = sorted.map((z) => Number(z.threshold ?? z.limit ?? 0));
+    const currentLoadData = sorted.map((z) => Number(z.person_count ?? z.count ?? 0));
     const accentColors = sorted.map((z, index) => {
       const color = ZONE_COLORS[index % ZONE_COLORS.length] || colors.primary;
       return (opacity = 1) => `rgba(${parseInt(color.slice(1, 3), 16)}, ${parseInt(color.slice(3, 5), 16)}, ${parseInt(color.slice(5, 7), 16)}, ${opacity * 0.95})`;
@@ -349,9 +358,8 @@ export default function AnalyticsScreen() {
       labels: sorted.map((z) => z.zone_name || z.name || `Zone ${z.zone || z.id}`),
       datasets: [
         {
-          data: dataPoints,
-          color: (opacity = 1, index) => accentColors[index](opacity),
-          withCustomBarColorFromData: true,
+          data: currentLoadData,
+          colors: accentColors,
         },
       ],
       legend: ["Current load"],
@@ -558,13 +566,25 @@ export default function AnalyticsScreen() {
                 .slice(0, 3)
                 .map((zone) => {
                   const badge = getZoneRiskBadge(zone.status);
+                  const expanded = expandedZone === zone.id;
                   return (
-                    <View key={zone.id} style={[styles.zoneCard, { borderColor: `${zone.accent}22` }]}> 
+                    <Pressable
+                      key={zone.id}
+                      onPress={() => toggleZoneDetails(zone.id)}
+                      style={[styles.zoneCard, { borderColor: `${zone.accent}22` }, expanded && styles.zoneCardExpanded]}
+                    >
                       <View style={styles.zoneCardHeader}>
-                        <Text style={styles.zoneCardLabel}>{zone.label}</Text>
-                        <View style={[styles.statusBadge, { backgroundColor: `${badge.color}18`, borderColor: `${badge.color}44` }]}> 
-                          <Text style={[styles.statusBadgeText, { color: badge.color }]}>{badge.label}</Text>
+                        <View style={styles.zoneLabelGroup}>
+                          <Text style={styles.zoneCardLabel}>{zone.label}</Text>
+                          <View style={[styles.zoneLabelPill, { backgroundColor: `${badge.color}16`, borderColor: `${badge.color}26` }]}> 
+                            <Text style={[styles.zoneLabelPillText, { color: badge.color }]}>{zone.bandLabel}</Text>
+                          </View>
                         </View>
+                        <MaterialCommunityIcons
+                          name={expanded ? "chevron-up" : "chevron-down"}
+                          size={18}
+                          color={colors.textMuted}
+                        />
                       </View>
                       <Text style={styles.zoneDescription}>{zone.description}</Text>
                       <View style={styles.zonePressureRow}>
@@ -579,7 +599,23 @@ export default function AnalyticsScreen() {
                           ]}
                         />
                       </View>
-                    </View>
+                      {expanded ? (
+                        <View style={styles.zoneExpandedContent}>
+                          <View style={styles.zoneDetailRow}>
+                            <Text style={styles.zoneDetailLabel}>Threshold</Text>
+                            <Text style={styles.zoneDetailValue}>{zone.threshold || "—"} people</Text>
+                          </View>
+                          <View style={styles.zoneDetailRow}>
+                            <Text style={styles.zoneDetailLabel}>Current status</Text>
+                            <Text style={[styles.zoneDetailValue, { color: badge.color }]}>{badge.label}</Text>
+                          </View>
+                          <View style={styles.zoneDetailRow}>
+                            <Text style={styles.zoneDetailLabel}>Trend</Text>
+                            <Text style={styles.zoneDetailValue}>{zone.pressureLabel}</Text>
+                          </View>
+                        </View>
+                      ) : null}
+                    </Pressable>
                   );
                 })}
             </View>
@@ -673,6 +709,9 @@ export default function AnalyticsScreen() {
                   withInnerLines={false}
                   yAxisLabel=""
                   yAxisSuffix=""
+                  barRadius={14}
+                  withCustomBarColorFromData
+                  flatColor={false}
                 />
                 <View style={styles.thresholdBanner}>
                   <Text style={styles.thresholdLabel}>Threshold line</Text>
@@ -777,6 +816,9 @@ export default function AnalyticsScreen() {
                 style={styles.chart}
                 yAxisLabel=""
                 yAxisSuffix="s"
+                fromZero
+                showBarTops
+                barRadius={14}
               />
             ) : (
               <Text style={styles.emptyText}>
@@ -1127,6 +1169,26 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(16,34,53,0.92)",
     paddingVertical: spacing.sm,
   },
+  thresholdBanner: {
+    marginTop: spacing.sm,
+    padding: spacing.sm,
+    backgroundColor: "rgba(14,65,114,0.16)",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(14,165,233,0.18)",
+  },
+  thresholdLabel: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: "700",
+    marginBottom: spacing.xs / 2,
+    textTransform: "uppercase",
+  },
+  thresholdValue: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+  },
   crowdSummaryHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -1234,6 +1296,52 @@ const styles = StyleSheet.create({
   zoneTrendFill: {
     height: "100%",
     borderRadius: 8,
+  },
+  zoneCardExpanded: {
+    borderColor: colors.primary,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    shadowOpacity: 0.16,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
+  zoneLabelGroup: {
+    flexDirection: "row",
+    alignItems: "center",
+    flex: 1,
+  },
+  zoneLabelPill: {
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  zoneLabelPillText: {
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  zoneExpandedContent: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.08)",
+  },
+  zoneDetailRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: spacing.xs,
+  },
+  zoneDetailLabel: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  zoneDetailValue: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: "900",
   },
   chartLegendRow: {
     marginTop: spacing.md,
