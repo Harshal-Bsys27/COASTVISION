@@ -1,9 +1,9 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { Dimensions, Pressable, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
 import { ActivityIndicator, Text } from "react-native-paper";
-import { BarChart, LineChart } from "react-native-chart-kit";
+import { BarChart } from "react-native-chart-kit";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { Rect, Text as SvgText } from "react-native-svg";
+import { Defs, LinearGradient, Path, Circle, Rect, Svg, Stop, Text as SvgText } from "react-native-svg";
 import ConnectionBanner from "../components/ConnectionBanner";
 import TabChipRow from "../components/TabChipRow";
 import { useApiContext } from "../context/ApiContext";
@@ -50,6 +50,169 @@ function formatTimelineLabel(point) {
   const date = new Date(ms);
   if (Number.isNaN(date.getTime())) return "—";
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function getSmoothPath(points) {
+  if (!points || points.length < 2) return "";
+  const path = [`M ${points[0].x} ${points[0].y}`];
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const p0 = i === 0 ? points[0] : points[i - 1];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = i + 2 < points.length ? points[i + 2] : p2;
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    path.push(`C ${cp1x} ${cp1y} ${cp2x} ${cp2y} ${p2.x} ${p2.y}`);
+  }
+  return path.join(" ");
+}
+
+function PersonCountLineChart({ labels, values, width, height, selectedIndex, onPointPress }) {
+  if (!values || !values.length) return null;
+  const padding = 34;
+  const chartWidth = Math.max(0, width - padding * 2);
+  const chartHeight = Math.max(0, height - padding * 2);
+  const dataMin = Math.min(...values, 0);
+  const dataMax = Math.max(...values, 0);
+  const range = dataMax - dataMin || 1;
+  const points = values.map((value, index) => {
+    const x = padding + (chartWidth * index) / Math.max(values.length - 1, 1);
+    const y = padding + chartHeight - ((value - dataMin) * chartHeight) / range;
+    return { x, y, value, index, label: labels?.[index] ?? "—" };
+  });
+  const linePath = getSmoothPath(points);
+  const fillPath = `${linePath} L ${points[points.length - 1].x} ${padding + chartHeight} L ${points[0].x} ${padding + chartHeight} Z`;
+  const yTicks = [dataMax, dataMax - range / 4, dataMax - (range / 2), dataMax - (3 * range) / 4, dataMin];
+
+  return (
+    <Svg width={width} height={height}>
+      <Defs>
+        <LinearGradient id="personCountGradient" x1="0" y1="0" x2="0" y2="1">
+          <Stop offset="0%" stopColor="rgba(59, 130, 246, 0.35)" />
+          <Stop offset="75%" stopColor="rgba(38, 132, 255, 0.05)" />
+          <Stop offset="100%" stopColor="rgba(15, 23, 42, 0)" />
+        </LinearGradient>
+      </Defs>
+
+      {yTicks.map((tick, index) => {
+        const y = padding + (chartHeight / 4) * index;
+        return (
+          <React.Fragment key={`grid-${index}`}>
+            <Path
+              d={`M ${padding} ${y} L ${padding + chartWidth} ${y}`}
+              stroke="rgba(148, 163, 184, 0.12)"
+              strokeWidth={1}
+            />
+            <SvgText
+              x={padding - 10}
+              y={y + 4}
+              fill="rgba(226, 232, 240, 0.65)"
+              fontSize="10"
+              textAnchor="end"
+            >
+              {Math.round(tick)}
+            </SvgText>
+          </React.Fragment>
+        );
+      })}
+
+      <Path d={fillPath} fill="url(#personCountGradient)" />
+      <Path
+        d={linePath}
+        fill="none"
+        stroke="rgba(56, 189, 248, 0.18)"
+        strokeWidth={10}
+        strokeLinecap="round"
+      />
+      <Path
+        d={linePath}
+        fill="none"
+        stroke="rgba(56, 189, 248, 1)"
+        strokeWidth={3}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+
+      {points.map((point) => {
+        const showAbove = point.y - 62 > padding;
+        const tooltipY = showAbove ? point.y - 62 : point.y + 18;
+        const tooltipX = Math.min(width - 58, Math.max(padding + 50, point.x));
+        return (
+          <React.Fragment key={`point-${point.index}`}>
+            <Circle
+              cx={point.x}
+              cy={point.y}
+              r={selectedIndex === point.index ? 8 : 5}
+              fill={selectedIndex === point.index ? "#38bdf8" : "#60a5fa"}
+              stroke={selectedIndex === point.index ? colors.surface : "rgba(248,250,252,0.16)"}
+              strokeWidth={selectedIndex === point.index ? 2 : 1}
+              onPress={() => onPointPress(point)}
+              onPressIn={() => onPointPress(point)}
+              onClick={() => onPointPress(point)}
+            />
+            <SvgText
+              x={point.x}
+              y={point.y - 10}
+              fill="rgba(248, 250, 252, 0.75)"
+              fontSize="8"
+              fontWeight="600"
+              textAnchor="middle"
+            >
+              {point.value}
+            </SvgText>
+            {selectedIndex === point.index ? (
+              <>
+                <Rect
+                  x={tooltipX - 50}
+                  y={tooltipY}
+                  width={100}
+                  height={44}
+                  rx={12}
+                  fill="rgba(15, 23, 42, 0.96)"
+                  stroke={colors.primary}
+                  strokeWidth={1}
+                />
+                <SvgText
+                  x={tooltipX}
+                  y={tooltipY + 18}
+                  fill={colors.text}
+                  fontSize="12"
+                  fontWeight="800"
+                  textAnchor="middle"
+                >
+                  {point.value} people
+                </SvgText>
+                <SvgText
+                  x={tooltipX}
+                  y={tooltipY + 32}
+                  fill={colors.textMuted}
+                  fontSize="9"
+                  textAnchor="middle"
+                >
+                  {point.label}
+                </SvgText>
+              </>
+            ) : null}
+          </React.Fragment>
+        );
+      })}
+
+      {labels.map((label, idx) => (
+        <SvgText
+          key={`xlabel-${idx}`}
+          x={padding + (chartWidth * idx) / Math.max(labels.length - 1, 1)}
+          y={height - 6}
+          fill="rgba(226, 232, 240, 0.75)"
+          fontSize="10"
+          textAnchor="middle"
+        >
+          {label}
+        </SvgText>
+      ))}
+    </Svg>
+  );
 }
 
 function normalizeCrowdZones(crowdStatus) {
@@ -436,6 +599,7 @@ export default function AnalyticsScreen() {
       <ScrollView
         style={styles.body}
         contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="always"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
       >
         <View style={styles.sectionHeader}>
@@ -513,73 +677,24 @@ export default function AnalyticsScreen() {
               </View>
             )}
             {timelineChart ? (
-              <LineChart
-                data={timelineChart}
-                width={chartWidth}
-                height={layout.chartHeight}
-                chartConfig={chartConfig}
-                bezier
-                style={styles.chart}
-                fromZero
-                withShadow
-                withDots
-                getDotColor={(dataPoint, index) =>
-                  selectedPoint?.index === index ? `rgba(56, 189, 248, 1)` : `rgba(56, 189, 248, 0.75)`
-                }
-                getDotProps={(dataPoint, index) =>
-                  selectedPoint?.index === index
-                    ? { r: "6", stroke: colors.surface, strokeWidth: "2" }
-                    : { r: "4" }
-                }
-                onDataPointClick={(event) => {
-                  const timestamp = timelineChart?.timestamps?.[event.index] ?? "—";
-                  setSelectedPoint({
-                    index: event.index,
-                    value: event.value,
-                    timestamp,
-                    x: event.x,
-                    y: event.y,
-                  });
-                }}
-                renderDotContent={({ x, y, index }) => {
-                  if (selectedPoint?.index !== index) return null;
-                  const value = timelineChart?.datasets?.[0]?.data?.[index] ?? "—";
-                  const timestamp = timelineChart?.timestamps?.[index] ?? "—";
-                  return (
-                    <>
-                      <Rect
-                        x={x - 42}
-                        y={y - 48}
-                        width={84}
-                        height={34}
-                        rx={10}
-                        fill={"rgba(15, 23, 42, 0.96)"}
-                        stroke={colors.primary}
-                        strokeWidth={1}
-                      />
-                      <SvgText
-                        x={x}
-                        y={y - 28}
-                        fill={colors.surface}
-                        fontSize="11"
-                        fontWeight="800"
-                        textAnchor="middle"
-                      >
-                        {value} people
-                      </SvgText>
-                      <SvgText
-                        x={x}
-                        y={y - 14}
-                        fill={"rgba(203, 213, 225, 0.88)"}
-                        fontSize="8"
-                        textAnchor="middle"
-                      >
-                        {timestamp}
-                      </SvgText>
-                    </>
-                  );
-                }}
-              />
+              <View style={[styles.chart, styles.lineChartContainer]}>
+                <PersonCountLineChart
+                  labels={timelineChart.labels}
+                  values={timelineChart.datasets[0]?.data || []}
+                  width={chartWidth}
+                  height={layout.chartHeight + 40}
+                  selectedIndex={selectedPoint?.index}
+                  onPointPress={(point) => {
+                    setSelectedPoint({
+                      index: point.index,
+                      value: point.value,
+                      timestamp: point.label,
+                      x: point.x,
+                      y: point.y,
+                    });
+                  }}
+                />
+              </View>
             ) : (
               <Text style={styles.emptyText}>Person count timeline will appear after the zone runs for a few seconds.</Text>
             )}
@@ -1236,6 +1351,15 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     backgroundColor: "rgba(16,34,53,0.92)",
     paddingVertical: spacing.sm,
+    pointerEvents: "box-none",
+  },
+  lineChartContainer: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm / 2,
+  },
+  chartPressable: {
+    borderRadius: 18,
+    overflow: "hidden",
   },
   thresholdBanner: {
     marginTop: spacing.sm,
