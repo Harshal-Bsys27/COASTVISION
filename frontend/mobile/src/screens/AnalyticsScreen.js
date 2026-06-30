@@ -18,25 +18,27 @@ const chartWidth = Dimensions.get("window").width - spacing.md * 2;
 
 const chartConfig = {
   backgroundColor: colors.surface,
-  backgroundGradientFrom: colors.surface,
-  backgroundGradientTo: colors.surfaceAlt,
-  backgroundGradientFromOpacity: 0.94,
+  backgroundGradientFrom: colors.surfaceAlt,
+  backgroundGradientTo: colors.surface,
+  backgroundGradientFromOpacity: 0.96,
   backgroundGradientToOpacity: 0.96,
   decimalPlaces: 0,
-  color: (opacity = 1) => `rgba(45, 212, 191, ${opacity})`,
-  labelColor: (opacity = 1) => `rgba(226, 232, 240, ${opacity * 0.9})`,
+  color: (opacity = 1) => `rgba(248, 250, 252, ${opacity})`,
+  labelColor: (opacity = 1) => `rgba(226, 232, 240, ${opacity * 0.85})`,
   propsForDots: {
     r: "4",
-    strokeWidth: "1",
-    stroke: colors.primary,
+    strokeWidth: "2",
+    stroke: colors.surface,
+    fill: colors.primary,
   },
   propsForBackgroundLines: {
     stroke: "rgba(148,163,184,0.14)",
     strokeDasharray: "4",
   },
   fillShadowGradient: colors.primary,
-  fillShadowGradientOpacity: 0.18,
-  useShadowColorFromDataset: false,
+  fillShadowGradientOpacity: 0.35,
+  barPercentage: 0.72,
+  useShadowColorFromDataset: true,
 };
 
 function formatTimelineLabel(point) {
@@ -59,6 +61,42 @@ function normalizeCrowdZones(crowdStatus) {
   }));
 }
 
+function getCrowdRiskLabel(zones) {
+  const crowded = zones.filter((zone) => zone.exceeded || zone.status === "crowded").length;
+  if (crowded >= 3) return { label: "High", color: colors.danger };
+  if (crowded === 2) return { label: "Medium", color: colors.warning };
+  if (crowded === 1) return { label: "Elevated", color: colors.primary };
+  return { label: "Normal", color: colors.success };
+}
+
+function getTrendLabel(delta) {
+  if (delta > 15) return { label: "Sharp rise", color: colors.danger };
+  if (delta > 7) return { label: "Rising", color: colors.warning };
+  if (delta >= -7) return { label: "Stable", color: colors.primary };
+  return { label: "Improving", color: colors.success };
+}
+
+function formatUpdatedAt(timestamp) {
+  if (!timestamp) return "—";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function parseDateMs(raw) {
+  if (!raw) return 0;
+  const ms = typeof raw === "number" && raw < 1e12 ? raw * 1000 : raw;
+  const date = new Date(ms);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
+function getZoneRiskBadge(status) {
+  const normalized = String(status || "safe").toLowerCase();
+  if (normalized === "crowded" || normalized === "high") return { label: "Crowded", color: colors.danger };
+  if (normalized === "warning" || normalized === "elevated" || normalized === "medium") return { label: "Warning", color: colors.warning };
+  return { label: "Safe", color: colors.success };
+}
+
 export default function AnalyticsScreen() {
   const { baseUrl, api, connected, assignedZones } = useApiContext();
   const [activeTab, setActiveTab] = useState("overview");
@@ -68,6 +106,8 @@ export default function AnalyticsScreen() {
   const [analysis, setAnalysis] = useState(null);
   const [timeline, setTimeline] = useState(null);
   const [crowdStatus, setCrowdStatus] = useState(null);
+  const [crowdAlerts, setCrowdAlerts] = useState([]);
+  const [crowdLastUpdated, setCrowdLastUpdated] = useState(null);
   const [responseTimes, setResponseTimes] = useState(null);
   const [personCountZone, setPersonCountZone] = useState(null);
   const [personZoneOptions, setPersonZoneOptions] = useState([]);
@@ -112,13 +152,16 @@ export default function AnalyticsScreen() {
             scoped.find((z) => String(z.id) === String(personCountZone?.id)) || scoped[0];
           await loadPersonCountTimeline(activeZone);
         } else if (tabId === "crowd") {
-          const raw = await api.crowdStatus();
-          const zones = filterCrowdZones(normalizeCrowdZones(raw), assignedZones);
-          setCrowdStatus({
-            ...raw,
+          const [rawStatus, alerts] = await Promise.all([api.crowdStatus(), api.crowdAlerts(20)]);
+          const zones = filterCrowdZones(normalizeCrowdZones(rawStatus), assignedZones);
+          const updated = {
+            ...rawStatus,
             zones,
             crowded_zones_count: zones.filter((z) => z.exceeded || z.status === "crowded").length,
-          });
+          };
+          setCrowdStatus(updated);
+          setCrowdAlerts(filterByZoneField(alerts?.alerts || [], assignedZones));
+          setCrowdLastUpdated(Date.now());
         } else if (tabId === "response") {
           const raw = await api.responseTimes();
           const recent = filterByZoneField(raw?.recent || [], assignedZones);
@@ -218,12 +261,20 @@ export default function AnalyticsScreen() {
     const zones = crowdZones || [];
     const totalPeople = zones.reduce((sum, zone) => sum + Number(zone.person_count ?? zone.count ?? 0), 0);
     const crowdedCount = zones.filter((zone) => zone.exceeded || zone.status === "crowded").length;
+    const averageLoad = zones.length ? totalPeople / zones.length : 0;
+    const topZone = zones
+      .slice()
+      .sort((a, b) => Number(b.person_count ?? b.count ?? 0) - Number(a.person_count ?? a.count ?? 0))[0];
+    const risk = getCrowdRiskLabel(zones);
+    const trendDelta = (zones.length ? topZone?.person_count ?? topZone?.count ?? 0 : 0) - (averageLoad || 0);
+    const trend = getTrendLabel(trendDelta);
     return {
       totalPeople,
       crowdedCount,
-      topZone: zones
-        .slice()
-        .sort((a, b) => Number(b.person_count ?? b.count ?? 0) - Number(a.person_count ?? a.count ?? 0))[0],
+      averageLoad: Math.round(averageLoad),
+      topZone,
+      risk,
+      trend,
     };
   }, [crowdZones]);
 
@@ -232,32 +283,78 @@ export default function AnalyticsScreen() {
       const count = Number(zone.person_count ?? zone.count ?? 0);
       const threshold = Number(zone.threshold ?? zone.limit ?? 0);
       const percent = threshold > 0 ? Math.min(count / threshold, 1) : 0;
+      const rawDelta = threshold > 0 ? Math.round((count / threshold) * 100) : 0;
+      const riskText = rawDelta >= 100 ? "Crowded" : rawDelta >= 75 ? "High" : rawDelta >= 50 ? "Medium" : "Safe";
       const colorIndex = index % ZONE_COLORS.length;
       return {
         id: zone.zone ?? zone.id,
         label: zone.zone_name || zone.name || `Zone ${zone.zone ?? zone.id}`,
+        description: zone.description || zone.zone_description || "No description available",
         count,
         threshold,
         percent,
-        status: zone.status || (threshold > 0 && count >= threshold ? "crowded" : "normal"),
+        crowdPressure: `${rawDelta}%`,
+        pressureLabel: riskText,
+        status: zone.status || (threshold > 0 && count >= threshold ? "crowded" : rawDelta >= 75 ? "warning" : "safe"),
         accent: ZONE_COLORS[colorIndex] || colors.primary,
       };
     });
   }, [crowdZones]);
 
+  const crowdAlertsByZone = useMemo(() => {
+    const bucketsByZone = {};
+    crowdAlerts.forEach((alert) => {
+      const zoneId = String(alert.zone ?? alert.zone_id ?? "—");
+      const timestamp = parseDateMs(alert.timestamp ?? alert.ts ?? alert.ts_utc);
+      if (!bucketsByZone[zoneId]) {
+        bucketsByZone[zoneId] = { zone: zoneId, alerts: [], count: 0 };
+      }
+      bucketsByZone[zoneId].count += 1;
+      bucketsByZone[zoneId].alerts.push(timestamp);
+    });
+
+    return Object.values(bucketsByZone)
+      .map((zone) => {
+        const sorted = zone.alerts.sort((a, b) => a - b);
+        const latest = sorted.slice(-6);
+        let sparkline = [0, 0, 0, 0, 0, 0];
+        if (latest.length) {
+          const minTs = latest[0];
+          const maxTs = latest[latest.length - 1] || minTs + 1;
+          const span = Math.max(maxTs - minTs, 1);
+          sparkline = latest.map((ts) => Math.round(((ts - minTs) / span) * 5));
+        }
+        return { ...zone, sorted, sparkline };
+      })
+      .sort((a, b) => b.count - a.count);
+  }, [crowdAlerts]);
+
+  const topCrowdAlertZones = useMemo(() => crowdAlertsByZone.slice(0, 3), [crowdAlertsByZone]);
+
   const crowdChart = useMemo(() => {
     if (!crowdZones.length) return null;
+
     const sorted = crowdZones
       .slice()
       .sort((a, b) => Number(b.person_count ?? b.count ?? 0) - Number(a.person_count ?? a.count ?? 0));
+
+    const dataPoints = sorted.map((z) => Number(z.person_count ?? z.count ?? 0));
+    const thresholdPoints = sorted.map((z) => Number(z.threshold ?? z.limit ?? 0));
+    const accentColors = sorted.map((z, index) => {
+      const color = ZONE_COLORS[index % ZONE_COLORS.length] || colors.primary;
+      return (opacity = 1) => `rgba(${parseInt(color.slice(1, 3), 16)}, ${parseInt(color.slice(3, 5), 16)}, ${parseInt(color.slice(5, 7), 16)}, ${opacity * 0.95})`;
+    });
+
     return {
       labels: sorted.map((z) => z.zone_name || z.name || `Zone ${z.zone || z.id}`),
       datasets: [
         {
-          data: sorted.map((z) => Number(z.person_count ?? z.count ?? 0)),
-          color: (opacity = 1) => `rgba(56, 189, 248, ${opacity})`,
+          data: dataPoints,
+          color: (opacity = 1, index) => accentColors[index](opacity),
+          withCustomBarColorFromData: true,
         },
       ],
+      legend: ["Current load"],
     };
   }, [crowdZones]);
 
@@ -269,7 +366,13 @@ export default function AnalyticsScreen() {
     if (!responseRows.length) return null;
     return {
       labels: responseRows.slice(0, 6).map((r) => `Z${r.zone}`),
-      datasets: [{ data: responseRows.slice(0, 6).map((r) => Number(r.response_time_seconds ?? r.seconds ?? 0)) }],
+      datasets: [
+        {
+          data: responseRows.slice(0, 6).map((r) => Number(r.response_time_seconds ?? r.seconds ?? 0)),
+          color: (opacity = 1) => `rgba(245, 158, 11, ${opacity})`,
+        },
+      ],
+      legend: ["Response time (s)"],
     };
   }, [responseRows]);
 
@@ -282,6 +385,13 @@ export default function AnalyticsScreen() {
       ? Object.entries(responseTimes.by_lifeguard).map(([id, stats]) => ({ id, ...stats }))
       : [];
   }, [responseTimes]);
+
+  const responseRisk = useMemo(() => {
+    const avg = responseSummary?.avg_response_time ?? 0;
+    if (avg > 12) return { label: "Slow", color: colors.danger };
+    if (avg > 7) return { label: "Moderate", color: colors.warning };
+    return { label: "Fast", color: colors.success };
+  }, [responseSummary]);
 
   const zoneRows = useMemo(() => {
     return responseTimes?.by_zone
@@ -404,21 +514,104 @@ export default function AnalyticsScreen() {
           <>
             {crowdStatus ? (
               <View style={styles.crowdSummaryCard}>
-                <View>
-                  <Text style={styles.crowdSummaryLabel}>Live Crowd Risk</Text>
-                  <Text style={styles.crowdRiskValue}>
-                    {crowdStatus.overall_safety ? crowdStatus.overall_safety.toUpperCase() : "UNKNOWN"}
-                  </Text>
+                <View style={styles.crowdSummaryHeader}>
+                  <View>
+                    <Text style={styles.crowdSummaryLabel}>Live Crowd Risk</Text>
+                    <Text style={[styles.crowdRiskValue, { color: crowdZoneSummary.risk.color }]}> 
+                      {crowdZoneSummary.risk.label}
+                    </Text>
+                  </View>
+                  <View style={styles.crowdSummaryMeta}>
+                    <View style={[styles.riskPill, { backgroundColor: `${crowdZoneSummary.risk.color}18`, borderColor: `${crowdZoneSummary.risk.color}44` }] }>
+                      <Text style={[styles.riskPillText, { color: crowdZoneSummary.risk.color }]}> {crowdZoneSummary.crowdedCount} crowded zones </Text>
+                    </View>
+                    <Text style={styles.updatedAtText}>Updated {formatUpdatedAt(crowdLastUpdated)}</Text>
+                  </View>
                 </View>
                 <View style={styles.summaryStats}>
                   <View style={styles.summaryStatItem}>
-                    <Text style={styles.summaryStatLabel}>Crowded Zones</Text>
-                    <Text style={styles.summaryStatValue}>{crowdZoneSummary.crowdedCount ?? 0}</Text>
-                  </View>
-                  <View style={styles.summaryStatItem}>
-                    <Text style={styles.summaryStatLabel}>People Total</Text>
+                    <Text style={styles.summaryStatLabel}>Total People</Text>
                     <Text style={styles.summaryStatValue}>{crowdZoneSummary.totalPeople}</Text>
                   </View>
+                  <View style={styles.summaryStatItem}>
+                    <Text style={styles.summaryStatLabel}>Average load</Text>
+                    <Text style={styles.summaryStatValue}>{crowdZoneSummary.averageLoad}</Text>
+                  </View>
+                  <View style={styles.summaryStatItem}>
+                    <Text style={styles.summaryStatLabel}>Top risk zone</Text>
+                    <Text style={styles.summaryStatValue}>
+                      {crowdZoneSummary.topZone?.zone_name || `Zone ${crowdZoneSummary.topZone ? (crowdZoneSummary.topZone.zone ?? crowdZoneSummary.topZone.id) : "—"}`}
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.trendRow}>
+                  <Text style={styles.trendLabel}>Trend</Text>
+                  <Text style={[styles.trendValue, { color: crowdZoneSummary.trend.color }]}>{crowdZoneSummary.trend.label}</Text>
+                </View>
+              </View>
+            ) : null}
+
+            <View style={styles.topZonesGroup}>
+              {crowdZoneProgress
+                .slice()
+                .sort((a, b) => Number(b.count) - Number(a.count))
+                .slice(0, 3)
+                .map((zone) => {
+                  const badge = getZoneRiskBadge(zone.status);
+                  return (
+                    <View key={zone.id} style={[styles.zoneCard, { borderColor: `${zone.accent}22` }]}> 
+                      <View style={styles.zoneCardHeader}>
+                        <Text style={styles.zoneCardLabel}>{zone.label}</Text>
+                        <View style={[styles.statusBadge, { backgroundColor: `${badge.color}18`, borderColor: `${badge.color}44` }]}> 
+                          <Text style={[styles.statusBadgeText, { color: badge.color }]}>{badge.label}</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.zoneDescription}>{zone.description}</Text>
+                      <View style={styles.zonePressureRow}>
+                        <Text style={styles.zonePressureLabel}>Pressure</Text>
+                        <Text style={[styles.zonePressureValue, { color: badge.color }]}>{zone.crowdPressure}</Text>
+                      </View>
+                      <View style={styles.zoneTrendBar}>
+                        <View
+                          style={[
+                            styles.zoneTrendFill,
+                            { width: `${Math.max(12, Math.floor(zone.percent * 100))}%`, backgroundColor: zone.accent },
+                          ]}
+                        />
+                      </View>
+                    </View>
+                  );
+                })}
+            </View>
+
+            {topCrowdAlertZones.length > 0 ? (
+              <View style={styles.alertFrequencySection}>
+                <Text style={styles.sectionHeaderTitle}>Alert frequency</Text>
+                <Text style={styles.sectionHeaderSub}>Recent crowd alert volume by zone</Text>
+                <View style={styles.alertFrequencyGrid}>
+                  {topCrowdAlertZones.map((zone) => {
+                    const zoneInfo = crowdZoneProgress.find((item) => String(item.id) === String(zone.zone));
+                    return (
+                      <View key={zone.zone} style={styles.alertFrequencyCard}>
+                        <Text style={styles.zoneCardLabel}>{zoneInfo?.label || `Zone ${zone.zone}`}</Text>
+                        <Text style={styles.alertFrequencyCount}>{zone.count} alerts</Text>
+                        <View style={styles.sparklineRow}>
+                          {zone.sparkline.map((value, index) => (
+                            <View
+                              key={index}
+                              style={[
+                                styles.sparkBar,
+                                {
+                                  height: 16 + value * 4,
+                                  backgroundColor: zoneInfo?.accent || colors.primary,
+                                },
+                              ]}
+                            />
+                          ))}
+                        </View>
+                      </View>
+                    );
+                  })}
                 </View>
               </View>
             ) : null}
@@ -428,9 +621,14 @@ export default function AnalyticsScreen() {
                 <View key={zone.id} style={styles.crowdProgressRow}>
                   <View style={styles.crowdProgressRowHeader}>
                     <Text style={styles.crowdProgressLabel}>{zone.label}</Text>
-                    <Text style={styles.crowdProgressMeta}>
-                      {zone.count} / {zone.threshold || "—"}
-                    </Text>
+                    <View style={styles.crowdMetaRow}>
+                      <Text style={styles.crowdProgressMeta}>{zone.count} / {zone.threshold || "—"}</Text>
+                      <View style={[styles.statusBadge, { backgroundColor: zone.status === "crowded" ? "rgba(239,68,68,0.16)" : zone.status === "elevated" ? "rgba(245,158,11,0.16)" : "rgba(34,197,94,0.16)", marginLeft: spacing.sm }]}>
+                        <Text style={[styles.statusBadgeText, { color: zone.status === "crowded" ? colors.danger : zone.status === "elevated" ? colors.warning : colors.success }]}>
+                          {zone.status?.toUpperCase() || "NORMAL"}
+                        </Text>
+                      </View>
+                    </View>
                   </View>
                   <View style={styles.crowdProgressBarTrack}>
                     <View
@@ -454,7 +652,16 @@ export default function AnalyticsScreen() {
 
             {crowdChart ? (
               <View style={styles.chartCard}>
-                <Text style={styles.chartTitle}>Zone crowd levels</Text>
+                <View style={styles.crowdChartHeader}>
+                  <View>
+                    <Text style={styles.chartTitle}>Zone crowd levels</Text>
+                    <Text style={styles.chartSubtitle}>Live crowd counts vs safe threshold for each zone.</Text>
+                  </View>
+                  <View style={styles.chartBadge}>
+                    <Text style={styles.chartBadgeLabel}>Peak risk</Text>
+                    <Text style={styles.chartBadgeValue}>{crowdZoneSummary.topZone?.zone_name || "—"}</Text>
+                  </View>
+                </View>
                 <BarChart
                   data={crowdChart}
                   width={chartWidth}
@@ -467,6 +674,38 @@ export default function AnalyticsScreen() {
                   yAxisLabel=""
                   yAxisSuffix=""
                 />
+                <View style={styles.thresholdBanner}>
+                  <Text style={styles.thresholdLabel}>Threshold line</Text>
+                  <Text style={styles.thresholdValue}>Target: across all zones</Text>
+                </View>
+                <View style={styles.chartLegendRow}>
+                  <View style={styles.chartLegendItem}>
+                    <View style={[styles.chartLegendDot, { backgroundColor: "rgba(56,189,248,0.95)" }]} />
+                    <Text style={styles.chartLegendText}>Current load</Text>
+                  </View>
+                  <View style={styles.chartLegendItem}>
+                    <View style={[styles.chartLegendDot, { backgroundColor: "rgba(245,158,11,0.85)" }]} />
+                    <Text style={styles.chartLegendText}>Threshold</Text>
+                  </View>
+                </View>
+                {crowdAlerts.length > 0 ? (
+                  <View style={styles.alertsCard}>
+                    <Text style={styles.breakdownTitle}>Recent crowd alerts</Text>
+                    {crowdAlerts.slice(0, 4).map((alert) => {
+                      const alertTime = formatUpdatedAt(alert.timestamp || alert.ts || alert.ts_utc);
+                      return (
+                        <View key={`${alert.zone}-${alert.timestamp || alert.ts || alert.ts_utc}`} style={styles.alertRow}>
+                          <View style={styles.alertDot} />
+                          <View style={styles.alertMeta}>
+                            <Text style={styles.alertLabel}>{alert.zone ? `Zone ${alert.zone}` : "Zone —"}</Text>
+                            <Text style={styles.alertSubtitle}>{`${alert.person_count ?? alert.count ?? "?"} / ${alert.threshold ?? alert.limit ?? "?"} people`}</Text>
+                          </View>
+                          <Text style={styles.alertTime}>{alertTime}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : null}
               </View>
             ) : (
               <Text style={styles.emptyText}>Crowd analytics updates as zones report live counts.</Text>
@@ -487,8 +726,8 @@ export default function AnalyticsScreen() {
                   <Text style={styles.statLabel}>Avg Response</Text>
                 </View>
                 <View style={styles.statCard}>
-                  <Text style={styles.statValue}>{responseSummary.min_response_time ?? 0}s</Text>
-                  <Text style={styles.statLabel}>Fastest Response</Text>
+                  <Text style={[styles.statValue, { color: responseRisk.color }]}>{responseRisk.label}</Text>
+                  <Text style={styles.statLabel}>Response Health</Text>
                 </View>
                 <View style={styles.statCard}>
                   <Text style={styles.statValue}>{responseSummary.max_response_time ?? 0}s</Text>
@@ -645,10 +884,11 @@ const styles = StyleSheet.create({
   cardGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: spacing.md,
+    justifyContent: "space-between",
   },
   statCard: {
     width: "48%",
+    marginBottom: spacing.md,
     backgroundColor: "rgba(16,34,53,0.68)",
     borderRadius: 14,
     borderWidth: 1,
@@ -767,10 +1007,11 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
     flexDirection: "row",
     justifyContent: "space-between",
-    gap: spacing.md,
+    flexWrap: "wrap",
   },
   summaryStatItem: {
     flex: 1,
+    marginBottom: spacing.md,
     padding: spacing.sm,
     backgroundColor: "rgba(255,255,255,0.04)",
     borderRadius: 14,
@@ -791,10 +1032,9 @@ const styles = StyleSheet.create({
   crowdProgressGroup: {
     marginTop: spacing.sm,
     marginBottom: spacing.md,
-    gap: spacing.sm,
   },
   crowdProgressRow: {
-    gap: spacing.xs,
+    marginBottom: spacing.sm,
   },
   crowdProgressRowHeader: {
     flexDirection: "row",
@@ -831,9 +1071,40 @@ const styles = StyleSheet.create({
   },
   chartTitle: {
     color: colors.text,
-    fontSize: 15,
-    fontWeight: "800",
+    fontSize: 16,
+    fontWeight: "900",
+    marginBottom: spacing.xs,
+  },
+  chartSubtitle: {
+    color: colors.textMuted,
+    fontSize: 12,
     marginBottom: spacing.sm,
+  },
+  crowdChartHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: spacing.md,
+  },
+  chartBadge: {
+    backgroundColor: "rgba(245,158,11,0.14)",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(245,158,11,0.24)",
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+  },
+  chartBadgeLabel: {
+    color: colors.textMuted,
+    fontSize: 10,
+    fontWeight: "700",
+    marginBottom: spacing.xs / 2,
+    textTransform: "uppercase",
+  },
+  chartBadgeValue: {
+    color: colors.warning,
+    fontSize: 13,
+    fontWeight: "900",
   },
   statValue: {
     color: colors.primary,
@@ -848,11 +1119,228 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   chart: {
-    borderRadius: 14,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: "rgba(53,214,195,0.22)",
+    borderColor: "rgba(53,214,195,0.24)",
     marginTop: spacing.md,
     overflow: "hidden",
+    backgroundColor: "rgba(16,34,53,0.92)",
+    paddingVertical: spacing.sm,
+  },
+  crowdSummaryHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: spacing.md,
+  },
+  riskPill: {
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  riskPillText: {
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  trendRow: {
+    marginTop: spacing.md,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  trendLabel: {
+    color: colors.textMuted,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  trendValue: {
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  crowdMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  crowdSummaryMeta: {
+    alignItems: "flex-end",
+  },
+  updatedAtText: {
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: spacing.xs,
+  },
+  topZonesGroup: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    marginBottom: spacing.md,
+  },
+  zoneCard: {
+    width: "48%",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+    borderColor: "rgba(255,255,255,0.08)",
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
+  },
+  zoneCardHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: spacing.xs,
+  },
+  zoneCardLabel: {
+    color: colors.text,
+    fontWeight: "800",
+    fontSize: 14,
+    flex: 1,
+    marginRight: spacing.sm,
+  },
+  zoneDescription: {
+    color: colors.textMuted,
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: spacing.sm,
+  },
+  zonePressureRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: spacing.sm,
+  },
+  zonePressureLabel: {
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  zonePressureValue: {
+    color: colors.text,
+    fontWeight: "900",
+    fontSize: 13,
+  },
+  zoneTrendBar: {
+    height: 8,
+    borderRadius: 8,
+    backgroundColor: "rgba(226,232,240,0.08)",
+    overflow: "hidden",
+  },
+  zoneTrendFill: {
+    height: "100%",
+    borderRadius: 8,
+  },
+  chartLegendRow: {
+    marginTop: spacing.md,
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  chartLegendItem: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  chartLegendDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: spacing.xs,
+  },
+  chartLegendText: {
+    color: colors.textMuted,
+    fontSize: 12,
+  },
+  alertsCard: {
+    backgroundColor: "rgba(16,34,53,0.72)",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(53,214,195,0.18)",
+    padding: spacing.md,
+    marginTop: spacing.md,
+  },
+  alertRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: spacing.xs,
+  },
+  alertFrequencySection: {
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(53,214,195,0.18)",
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  alertFrequencyGrid: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    marginTop: spacing.md,
+  },
+  alertFrequencyCard: {
+    width: "48%",
+    backgroundColor: "rgba(16,34,53,0.68)",
+    borderRadius: 16,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  alertFrequencyCount: {
+    color: colors.primary,
+    fontWeight: "900",
+    fontSize: 18,
+    marginVertical: spacing.xs,
+  },
+  sparklineRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    height: 32,
+  },
+  sparkBar: {
+    flex: 1,
+    marginHorizontal: 2,
+    borderRadius: 4,
+  },
+  alertDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.primary,
+    marginRight: spacing.sm,
+  },
+  alertMeta: {
+    flex: 1,
+  },
+  alertLabel: {
+    color: colors.text,
+    fontWeight: "700",
+    fontSize: 13,
+  },
+  alertSubtitle: {
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: spacing.xs / 2,
+  },
+  alertTime: {
+    color: colors.textMuted,
+    fontSize: 11,
+    marginLeft: spacing.sm,
+    textAlign: "right",
+  },
+  statusBadge: {
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  statusBadgeText: {
+    fontSize: 11,
+    fontWeight: "800",
   },
   centered: {
     flex: 1,
