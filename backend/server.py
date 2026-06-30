@@ -13,6 +13,7 @@ import threading
 import time
 import sys
 import platform
+import traceback
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -36,7 +37,11 @@ if env_file.exists():
 import cv2
 import numpy as np
 import torch
-from flask import Flask, Response, abort, jsonify, request
+from flask import Flask, Response, abort, jsonify, request, send_from_directory
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 from flask_cors import CORS
 from ultralytics import YOLO
 from flask_socketio import SocketIO, emit
@@ -431,7 +436,18 @@ def _load_crowd_thresholds():
     if CROWD_THRESHOLDS_FILE.exists():
         try:
             with open(CROWD_THRESHOLDS_FILE, "r") as f:
-                CROWD_THRESHOLDS = json.load(f)
+                raw = json.load(f)
+                normalized = {}
+                for key, value in (raw or {}).items():
+                    try:
+                        zid = int(key)
+                    except Exception:
+                        continue
+                    try:
+                        normalized[zid] = int(value)
+                    except Exception:
+                        normalized[zid] = 50
+                CROWD_THRESHOLDS = normalized
             print(f"[crowd] Loaded thresholds: {CROWD_THRESHOLDS}")
         except Exception as e:
             print(f"[crowd] Error loading thresholds: {e}")
@@ -1977,7 +1993,7 @@ def crowd_status_all():
             person_count = status.get("count", 0)
             threshold = status.get("threshold", 50)
             
-            zones_status[zid] = {
+            zones_status[str(zid)] = {
                 "zone_name": _get_zone_display_name(zid),
                 "person_count": person_count,
                 "threshold": threshold,
@@ -2030,38 +2046,44 @@ def crowd_threshold(zid: int):
 @app.route("/api/analytics/crowd-alerts", methods=["GET"])
 def crowd_alerts():
     """Get crowd alert history."""
-    limit = int(request.args.get("limit", "100"))
-    zone_filter = request.args.get("zone", "").strip()
-    
-    with _crowd_lock:
-        alerts = []
-        for alert in list(CROWD_ALERT_HISTORY):
-            if zone_filter and str(alert.get("zone")) != str(zone_filter):
-                continue
-            alerts.append({
-                "timestamp": alert.get("ts"),
-                "zone": alert.get("zone"),
-                "zone_name": _get_zone_display_name(alert.get("zone")),
-                "person_count": alert.get("person_count"),
-                "threshold": alert.get("threshold"),
-                "severity": alert.get("severity"),
-            })
-            if len(alerts) >= limit:
-                break
-    
-    # Count by severity
-    severity_counts = {
-        "low": sum(1 for a in alerts if a["severity"] == "low"),
-        "medium": sum(1 for a in alerts if a["severity"] == "medium"),
-        "high": sum(1 for a in alerts if a["severity"] == "high")
-    }
-    
-    return jsonify({
-        "alerts": alerts,
-        "total": len(alerts),
-        "severity_counts": severity_counts,
-        "thresholds": dict(CROWD_THRESHOLDS)
-    })
+    try:
+        limit = int(request.args.get("limit", "100"))
+        zone_filter = request.args.get("zone", "").strip()
+        
+        with _crowd_lock:
+            alerts = []
+            for alert in list(CROWD_ALERT_HISTORY):
+                if zone_filter and str(alert.get("zone")) != str(zone_filter):
+                    continue
+                alerts.append({
+                    "timestamp": alert.get("ts"),
+                    "zone": alert.get("zone"),
+                    "zone_name": _get_zone_display_name(alert.get("zone")),
+                    "person_count": alert.get("person_count"),
+                    "threshold": alert.get("threshold"),
+                    "severity": alert.get("severity"),
+                })
+                if len(alerts) >= limit:
+                    break
+        
+        # Count by severity
+        severity_counts = {
+            "low": sum(1 for a in alerts if a["severity"] == "low"),
+            "medium": sum(1 for a in alerts if a["severity"] == "medium"),
+            "high": sum(1 for a in alerts if a["severity"] == "high")
+        }
+        thresholds = {str(zid): threshold for zid, threshold in CROWD_THRESHOLDS.items()}
+        
+        return jsonify({
+            "alerts": alerts,
+            "total": len(alerts),
+            "severity_counts": severity_counts,
+            "thresholds": thresholds
+        })
+    except Exception as e:
+        print("[crowd] crowd_alerts error:", e)
+        traceback.print_exc()
+        return jsonify({"error": "Internal crowd-alerts error", "details": str(e)}), 500
 
 
 # ----------------- LIFEGUARD API ENDPOINTS -----------------
@@ -2121,13 +2143,120 @@ def register_lifeguard():
     }), 201
 
 
+def _get_lifeguard_id_from_token():
+    """Extract lifeguard id from Authorization bearer token."""
+    auth_header = request.headers.get("Authorization", "") or ""
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+        return LIFEGUARD_SESSIONS.get(token), token
+    return None, None
+
+
+@app.route("/api/lifeguards/login", methods=["POST"])
+def lifeguard_login():
+    """Log in an existing lifeguard by phone and return a session token."""
+    data = request.get_json() or {}
+    phone = str(data.get("phone", "")).strip()
+    if not phone:
+        return jsonify({"error": "Phone number is required"}), 400
+
+    with _lifeguard_lock:
+        lg_id = None
+        for lid, lg in LIFEGUARDS.items():
+            if str(lg.get("phone", "")).strip() == phone:
+                lg_id = lid
+                break
+
+        if lg_id is None:
+            return jsonify({"error": "Lifeguard not found"}), 404
+
+        lg = LIFEGUARDS[lg_id]
+        session_token = str(uuid.uuid4())
+        LIFEGUARD_SESSIONS[session_token] = lg_id
+        lg["online"] = True
+        lg["last_seen"] = time.time()
+        _save_lifeguards()
+
+    return jsonify({
+        "id": lg_id,
+        "name": lg.get("name"),
+        "phone": lg.get("phone"),
+        "zones": lg.get("zones", []),
+        "session_token": session_token,
+        "message": "Login successful"
+    })
+
+
+@app.route("/api/lifeguards/me", methods=["GET"])
+def lifeguard_me():
+    """Return the currently authenticated lifeguard profile."""
+    lg_id, _token = _get_lifeguard_id_from_token()
+    if not lg_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    with _lifeguard_lock:
+        lg = LIFEGUARDS.get(lg_id)
+        if not lg:
+            return jsonify({"error": "Lifeguard not found"}), 404
+
+        lg_copy = dict(lg)
+        host = request.host_url.rstrip("/")
+        avatar = lg_copy.get("avatar")
+        thumb = lg_copy.get("avatar_thumb")
+        if avatar and isinstance(avatar, str) and avatar.startswith("/"):
+            lg_copy["avatar"] = f"{host}{avatar}"
+        if thumb and isinstance(thumb, str) and thumb.startswith("/"):
+            lg_copy["avatar_thumb"] = f"{host}{thumb}"
+
+        # Only return common profile fields (include avatar URLs when present)
+        return jsonify({
+            "id": lg_id,
+            "name": lg_copy.get("name"),
+            "phone": lg_copy.get("phone"),
+            "zones": lg_copy.get("zones", []),
+            "online": lg_copy.get("online", False),
+            "last_seen": lg_copy.get("last_seen"),
+            "avatar": lg_copy.get("avatar"),
+            "avatar_thumb": lg_copy.get("avatar_thumb"),
+        })
+
+
+@app.route("/api/lifeguards/logout", methods=["POST"])
+def lifeguard_logout():
+    """Log out the current lifeguard session."""
+    lg_id, token = _get_lifeguard_id_from_token()
+    if not token:
+        return jsonify({"status": "ok"})
+
+    with _lifeguard_lock:
+        if token in LIFEGUARD_SESSIONS:
+            del LIFEGUARD_SESSIONS[token]
+        if lg_id and lg_id in LIFEGUARDS:
+            LIFEGUARDS[lg_id]["online"] = False
+            _save_lifeguards()
+
+    return jsonify({"status": "ok"})
+
+
 @app.route("/api/lifeguards", methods=["GET"])
 def list_lifeguards():
     """List all registered lifeguards (admin view)."""
     with _lifeguard_lock:
+        # Return absolute URLs for avatars so mobile clients can load them
+        host = request.host_url.rstrip("/")
+        lifeguards_out = []
+        for lg in LIFEGUARDS.values():
+            lg_copy = dict(lg)
+            avatar = lg_copy.get("avatar")
+            thumb = lg_copy.get("avatar_thumb")
+            if avatar and avatar.startswith("/"):
+                lg_copy["avatar"] = f"{host}{avatar}"
+            if thumb and thumb.startswith("/"):
+                lg_copy["avatar_thumb"] = f"{host}{thumb}"
+            lifeguards_out.append(lg_copy)
         return jsonify({
-            "lifeguards": list(LIFEGUARDS.values()),
-            "count": len(LIFEGUARDS)
+            "lifeguards": lifeguards_out,
+            "count": len(lifeguards_out)
         })
 
 
@@ -2138,7 +2267,15 @@ def get_lifeguard(lg_id: str):
         lg = LIFEGUARDS.get(lg_id)
         if not lg:
             return jsonify({"error": "Lifeguard not found"}), 404
-        return jsonify(lg)
+        lg_copy = dict(lg)
+        host = request.host_url.rstrip("/")
+        avatar = lg_copy.get("avatar")
+        thumb = lg_copy.get("avatar_thumb")
+        if avatar and avatar.startswith("/"):
+            lg_copy["avatar"] = f"{host}{avatar}"
+        if thumb and thumb.startswith("/"):
+            lg_copy["avatar_thumb"] = f"{host}{thumb}"
+        return jsonify(lg_copy)
 
 
 @app.route("/api/lifeguards/<lg_id>/assign", methods=["POST"])
@@ -2158,6 +2295,103 @@ def assign_lifeguard_zones(lg_id: str):
         "zones": LIFEGUARDS[lg_id]["zones"],
         "message": f"Assigned to zones: {zones if zones else 'ALL'}"
     })
+
+
+@app.route("/api/lifeguards/<lg_id>/avatar", methods=["POST"])
+def upload_lifeguard_avatar(lg_id: str):
+    """Upload and store a lifeguard avatar image. Returns public URL."""
+    if 'avatar' not in request.files:
+        return jsonify({"error": "No file part 'avatar'"}), 400
+    file = request.files['avatar']
+    if file.filename == "":
+        return jsonify({"error": "No selected file"}), 400
+
+    with _lifeguard_lock:
+        if lg_id not in LIFEGUARDS:
+            return jsonify({"error": "Lifeguard not found"}), 404
+
+        # Ensure avatars directory exists
+        avatars_dir = (ALERTS_DIR / "lifeguard_avatars").resolve()
+        try:
+            avatars_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return jsonify({"error": f"Could not create avatars dir: {e}"}), 500
+
+        # Build safe filename
+        import time, werkzeug
+        fname = werkzeug.utils.secure_filename(file.filename)
+        ext = Path(fname).suffix or ".jpg"
+        out_name = f"{lg_id}_{int(time.time())}{ext}"
+        out_path = avatars_dir / out_name
+
+        try:
+            file.save(str(out_path))
+        except Exception as e:
+            return jsonify({"error": f"Failed to save file: {e}"}), 500
+
+        # Optionally create a thumbnail if PIL available
+        thumb_name = None
+        if Image is not None:
+            try:
+                img = Image.open(out_path)
+                img.thumbnail((320, 320))
+                thumb_name = f"{lg_id}_{int(time.time())}_thumb{ext}"
+                thumb_path = avatars_dir / thumb_name
+                img.save(thumb_path)
+            except Exception as e:
+                print(f"[avatar] Thumbnail generation failed: {e}")
+
+        # Save relative URL into lifeguard record
+        public_url = f"/lifeguard_avatars/{out_name}"
+        LIFEGUARDS[lg_id]["avatar"] = public_url
+        if thumb_name:
+            LIFEGUARDS[lg_id]["avatar_thumb"] = f"/lifeguard_avatars/{thumb_name}"
+        _save_lifeguards()
+
+    # Return both paths (relative) for frontend convenience
+    resp = {"avatar_url": public_url}
+    if thumb_name:
+        resp["avatar_thumb_url"] = f"/lifeguard_avatars/{thumb_name}"
+    return jsonify(resp), 201
+
+
+@app.route("/api/lifeguards/<lg_id>", methods=["DELETE"])
+def delete_lifeguard(lg_id: str):
+    """Delete a lifeguard and associated avatar files."""
+    with _lifeguard_lock:
+        if lg_id not in LIFEGUARDS:
+            return jsonify({"error": "Lifeguard not found"}), 404
+        # delete avatar files if present
+        avatars_dir = (ALERTS_DIR / "lifeguard_avatars").resolve()
+        lg = LIFEGUARDS[lg_id]
+        for key in ("avatar", "avatar_thumb"):
+            path = lg.get(key)
+            if path and isinstance(path, str) and path.startswith("/lifeguard_avatars/"):
+                fname = path.split("/lifeguard_avatars/", 1)[-1]
+                try:
+                    p = avatars_dir / fname
+                    if p.exists():
+                        p.unlink()
+                except Exception as e:
+                    print(f"[lifeguard] Failed to remove avatar file {fname}: {e}")
+        # remove lifeguard
+        del LIFEGUARDS[lg_id]
+        LIFEGUARD_ALERTS.pop(lg_id, None)
+        LIFEGUARD_SSE_QUEUES.pop(lg_id, None)
+        # remove any sessions pointing to this id
+        for token, lid in list(LIFEGUARD_SESSIONS.items()):
+            if lid == lg_id:
+                del LIFEGUARD_SESSIONS[token]
+        _save_lifeguards()
+    return jsonify({"status": "deleted"})
+
+
+@app.route('/lifeguard_avatars/<path:filename>')
+def serve_lifeguard_avatar(filename: str):
+    avatars_dir = (ALERTS_DIR / "lifeguard_avatars").resolve()
+    if not (avatars_dir / filename).exists():
+        abort(404)
+    return send_from_directory(str(avatars_dir), filename)
 
 
 @app.route("/api/lifeguards/<lg_id>/alerts", methods=["GET"])
