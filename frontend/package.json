@@ -6,6 +6,9 @@
     "dev": "npm --prefix web run dev",
     "build": "npm --prefix web run build",
     "preview": "npm --prefix web run preview",
-    "install:web": "npm --prefix web install"
+    "install:web": "npm --prefix web install",
+    "mobile": "npm --prefix mobile run start",
+    "mobile:android": "npm --prefix mobile run android",
+    "install:mobile": "npm --prefix mobile install"
   }
 }
