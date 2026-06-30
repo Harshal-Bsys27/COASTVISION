@@ -3,6 +3,7 @@ import { Dimensions, Pressable, RefreshControl, ScrollView, StyleSheet, View } f
 import { ActivityIndicator, Text } from "react-native-paper";
 import { BarChart, LineChart } from "react-native-chart-kit";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { Rect, Text as SvgText } from "react-native-svg";
 import ConnectionBanner from "../components/ConnectionBanner";
 import TabChipRow from "../components/TabChipRow";
 import { useApiContext } from "../context/ApiContext";
@@ -113,6 +114,7 @@ export default function AnalyticsScreen() {
   const [responseTimes, setResponseTimes] = useState(null);
   const [personCountZone, setPersonCountZone] = useState(null);
   const [personZoneOptions, setPersonZoneOptions] = useState([]);
+  const [selectedPoint, setSelectedPoint] = useState(null);
   const [loadedTabs, setLoadedTabs] = useState({});
 
   const personZoneTabs = useMemo(
@@ -251,7 +253,14 @@ export default function AnalyticsScreen() {
     const data = slice.map((p) => Number(p.count ?? p.person_count ?? 0));
     return {
       labels: labels.length ? labels : ["—"],
-      datasets: [{ data: data.length ? data : [0] }],
+      datasets: [
+        {
+          data: data.length ? data : [0],
+          color: (opacity = 1) => `rgba(56, 189, 248, ${opacity})`,
+          strokeWidth: 3,
+        },
+      ],
+      timestamps: labels,
     };
   }, [timeline]);
 
@@ -511,6 +520,65 @@ export default function AnalyticsScreen() {
                 chartConfig={chartConfig}
                 bezier
                 style={styles.chart}
+                fromZero
+                withShadow
+                withDots
+                getDotColor={(dataPoint, index) =>
+                  selectedPoint?.index === index ? `rgba(56, 189, 248, 1)` : `rgba(56, 189, 248, 0.75)`
+                }
+                getDotProps={(dataPoint, index) =>
+                  selectedPoint?.index === index
+                    ? { r: "6", stroke: colors.surface, strokeWidth: "2" }
+                    : { r: "4" }
+                }
+                onDataPointClick={(event) => {
+                  const timestamp = timelineChart?.timestamps?.[event.index] ?? "—";
+                  setSelectedPoint({
+                    index: event.index,
+                    value: event.value,
+                    timestamp,
+                    x: event.x,
+                    y: event.y,
+                  });
+                }}
+                renderDotContent={({ x, y, index }) => {
+                  if (selectedPoint?.index !== index) return null;
+                  const value = timelineChart?.datasets?.[0]?.data?.[index] ?? "—";
+                  const timestamp = timelineChart?.timestamps?.[index] ?? "—";
+                  return (
+                    <>
+                      <Rect
+                        x={x - 42}
+                        y={y - 48}
+                        width={84}
+                        height={34}
+                        rx={10}
+                        fill={"rgba(15, 23, 42, 0.96)"}
+                        stroke={colors.primary}
+                        strokeWidth={1}
+                      />
+                      <SvgText
+                        x={x}
+                        y={y - 28}
+                        fill={colors.surface}
+                        fontSize="11"
+                        fontWeight="800"
+                        textAnchor="middle"
+                      >
+                        {value} people
+                      </SvgText>
+                      <SvgText
+                        x={x}
+                        y={y - 14}
+                        fill={"rgba(203, 213, 225, 0.88)"}
+                        fontSize="8"
+                        textAnchor="middle"
+                      >
+                        {timestamp}
+                      </SvgText>
+                    </>
+                  );
+                }}
               />
             ) : (
               <Text style={styles.emptyText}>Person count timeline will appear after the zone runs for a few seconds.</Text>
