@@ -65,6 +65,12 @@ CoastVision is an end-to-end coastal/pool safety monitoring project designed to 
 - Lifeguard registration + zone assignment + alert routing
 - Telegram notifications and controls through dashboard UI
 
+
+### Lifeguard Operations Mobile app 
+-  zone assignment + alert routing
+- a proper mobile app showing lifeguard command deck having zone currently assigned to the lifeguard
+- Analytics section which shows real time analytics for assigned zones 
+
 ---
 
 ## Demo Video
