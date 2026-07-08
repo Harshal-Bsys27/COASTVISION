@@ -4,9 +4,7 @@ import { ActivityIndicator, Text } from "react-native-paper";
 import { colors } from "../theme";
 
 /**
- * Flicker-free frame streaming for zone cards.
- * Smart strategy: Keep showing previous frame while new one loads.
- * Never blank the screen, no flickering.
+ * Real-time zone streaming that starts immediately and stays live without blanking the card.
  */
 export default function ZoneStream({ frameUrl, height = 200, fps = 5 }) {
   const [displayUrl, setDisplayUrl] = useState(null);
@@ -16,7 +14,12 @@ export default function ZoneStream({ frameUrl, height = 200, fps = 5 }) {
   const pollingIntervalRef = useRef(null);
   const urlRef = useRef(frameUrl);
   const displayUrlRef = useRef(null);
-  const effectiveFps = Math.min(15, Math.max(1, Number(fps) || 5));
+  const effectiveFps = Math.min(20, Math.max(3, Number(fps) || 10));
+
+  const buildFrameUrl = (sourceUrl, frameIndex = 0) => {
+    const separator = sourceUrl.includes("?") ? "&" : "?";
+    return `${sourceUrl}${separator}_f=${frameIndex}`;
+  };
 
   // Update URL reference
   useEffect(() => {
@@ -27,48 +30,55 @@ export default function ZoneStream({ frameUrl, height = 200, fps = 5 }) {
     if (!frameUrl) {
       setFailed(false);
       setIsInitialLoading(false);
+      setDisplayUrl(null);
+      displayUrlRef.current = null;
       return undefined;
     }
 
+    let active = true;
     setFailed(false);
-    frameCountRef.current = 0;
-    setDisplayUrl(null);
     setIsInitialLoading(true);
+    frameCountRef.current = 0;
+    const firstFrameUrl = buildFrameUrl(frameUrl, 0);
+    setDisplayUrl(firstFrameUrl);
+    displayUrlRef.current = firstFrameUrl;
+    setIsInitialLoading(false);
 
-    // Load first frame
-    const firstFrameUrl = `${frameUrl}${frameUrl.includes("?") ? "&" : "?"}_f=0`;
-    Image.prefetch(firstFrameUrl)
-      .then(() => {
-        setDisplayUrl(firstFrameUrl);
-        displayUrlRef.current = firstFrameUrl;
-        setIsInitialLoading(false);
-      })
-      .catch(() => {
-        setIsInitialLoading(false);
+    const preloadFrame = async (candidateUrl) => {
+      try {
+        await Image.prefetch(candidateUrl);
+        if (!active) return;
+      } catch {
+        if (!active) return;
         setFailed(true);
-      });
+      }
+    };
 
-    // Start polling after 1 second
+    preloadFrame(firstFrameUrl);
+
     const startPolling = setTimeout(() => {
       pollingIntervalRef.current = setInterval(() => {
         frameCountRef.current += 1;
-        const newFrameUrl = `${urlRef.current}${urlRef.current.includes("?") ? "&" : "?"}_f=${frameCountRef.current}`;
-        
-        // Prefetch next frame but don't block on it
-        Image.prefetch(newFrameUrl).then(() => {
-          setDisplayUrl(newFrameUrl);
-          displayUrlRef.current = newFrameUrl;
-        }).catch(() => {});
-      }, 1000 / effectiveFps); // configurable FPS polling
-    }, 1000);
+        const newFrameUrl = buildFrameUrl(urlRef.current, frameCountRef.current);
+        if (displayUrlRef.current === newFrameUrl) return;
+        Image.prefetch(newFrameUrl)
+          .then(() => {
+            if (!active || displayUrlRef.current === newFrameUrl) return;
+            setDisplayUrl(newFrameUrl);
+            displayUrlRef.current = newFrameUrl;
+          })
+          .catch(() => {});
+      }, Math.max(120, 1000 / effectiveFps));
+    }, 80);
 
     return () => {
+      active = false;
       clearTimeout(startPolling);
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
       }
     };
-  }, [frameUrl]);
+  }, [frameUrl, effectiveFps]);
 
   if (!frameUrl) {
     return (
@@ -93,9 +103,10 @@ export default function ZoneStream({ frameUrl, height = 200, fps = 5 }) {
           source={{ uri: displayUrl }}
           style={styles.video}
           resizeMode="cover"
+          onError={() => setFailed(true)}
         />
       )}
-      {isInitialLoading && (
+      {!displayUrl && isInitialLoading && (
         <View style={styles.loaderOverlay}>
           <ActivityIndicator size="small" color={colors.primary} />
         </View>
@@ -121,7 +132,21 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "rgba(0,0,0,0.3)",
+    backgroundColor: "rgba(0,0,0,0.32)",
+  },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "flex-end",
+    alignItems: "flex-start",
+    padding: 8,
+    backgroundColor: "rgba(0,0,0,0.16)",
+  },
+  overlayText: {
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
   },
   fallback: {
     color: colors.textMuted,
@@ -130,3 +155,4 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
 });
+

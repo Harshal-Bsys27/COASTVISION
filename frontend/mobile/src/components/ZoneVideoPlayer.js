@@ -21,9 +21,10 @@ export default function ZoneVideoPlayer({
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const pollingIntervalRef = useRef(null);
   const frameCountRef = useRef(0);
+  const requestIdRef = useRef(0);
   const urlRef = useRef(frameUrl || streamUrl);
   const displayUrlRef = useRef(null);
-  const effectiveFps = Math.min(15, Math.max(1, Number(fps) || 5));
+  const effectiveFps = Math.min(20, Math.max(3, Number(fps) || 10));
 
   // Calculate responsive dimensions
   const containerWidth = width - 32; // padding
@@ -45,53 +46,51 @@ export default function ZoneVideoPlayer({
       return undefined;
     }
 
+    let active = true;
     setFailed(false);
-    frameCountRef.current = 0;
-    setDisplayUrl(null);
     setIsInitialLoading(true);
+    frameCountRef.current = 0;
+    requestIdRef.current += 1;
+    const firstFrameUrl = `${activeUrl}${activeUrl.includes("?") ? "&" : "?"}_f=0`;
+    setDisplayUrl(firstFrameUrl);
+    displayUrlRef.current = firstFrameUrl;
 
-    // Load first frame aggressively
-    const loadFirstFrame = () => {
-      const firstFrameUrl = `${activeUrl}${activeUrl.includes("?") ? "&" : "?"}_f=0`;
-      Image.prefetch(firstFrameUrl)
-        .then(() => {
-          setDisplayUrl(firstFrameUrl);
-          displayUrlRef.current = firstFrameUrl;
-          setIsInitialLoading(false);
-        })
-        .catch(() => {
-          // Retry after 500ms
-          setTimeout(loadFirstFrame, 500);
-        });
-    };
+    Image.prefetch(firstFrameUrl)
+      .then(() => {
+        if (!active) return;
+        setIsInitialLoading(false);
+        setFailed(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setIsInitialLoading(false);
+        setFailed(true);
+      });
 
-    loadFirstFrame();
-
-    // Start polling after 1 second
     const startPolling = setTimeout(() => {
       pollingIntervalRef.current = setInterval(() => {
         frameCountRef.current += 1;
         const newFrameUrl = `${urlRef.current}${urlRef.current.includes("?") ? "&" : "?"}_f=${frameCountRef.current}`;
-        
-        // Prefetch in background, update display when ready
+        const requestId = ++requestIdRef.current;
+
         Image.prefetch(newFrameUrl)
           .then(() => {
+            if (!active || requestId !== requestIdRef.current) return;
             setDisplayUrl(newFrameUrl);
             displayUrlRef.current = newFrameUrl;
           })
-          .catch(() => {
-            // Silently fail and keep showing current frame
-          });
-      }, 1000 / effectiveFps); // configured FPS - stable, no flickering
-    }, 1000);
+          .catch(() => {});
+      }, Math.max(80, 1000 / effectiveFps));
+    }, 120);
 
     return () => {
+      active = false;
       clearTimeout(startPolling);
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
       }
     };
-  }, [frameUrl, streamUrl]);
+  }, [frameUrl, streamUrl, effectiveFps]);
 
   if (!frameUrl && !streamUrl) {
     return (
@@ -165,3 +164,4 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
 });
+
