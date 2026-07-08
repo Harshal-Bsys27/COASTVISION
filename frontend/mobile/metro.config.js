@@ -1,14 +1,14 @@
-const { getDefaultConfig } = require("expo/metro-config");
-const path = require("path");
+const { getDefaultConfig } = (() => {
+  try {
+    return require("expo/metro-config");
+  } catch {
+    return require("@expo/metro-config");
+  }
+})();
 
-const projectRoot = __dirname;
-const workspaceRoot = path.resolve(projectRoot, "..");
-
-const config = getDefaultConfig(projectRoot);
-
-config.watchFolders = [workspaceRoot];
-config.resolver.nodeModulesPaths = [
-  path.resolve(projectRoot, "node_modules"),
-];
+const config = getDefaultConfig(__dirname);
+config.resolver = config.resolver || {};
+config.resolver.blockList = [/.*\.claude[\\/].*$/];
 
 module.exports = config;
+

@@ -8,9 +8,11 @@
     "@react-navigation/bottom-tabs": "^7.16.2",
     "@react-navigation/native": "^7.2.5",
     "@react-navigation/native-stack": "^7.16.0",
-    "expo": "~56.0.12",
+    "expo": "~56.0.13",
+    "expo-dev-client": "~56.0.21",
     "expo-font": "~56.0.7",
     "expo-haptics": "~56.0.3",
+    "expo-image-picker": "~56.0.19",
     "expo-status-bar": "~56.0.4",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -23,14 +25,19 @@
     "react-native-web": "^0.21.2"
   },
   "scripts": {
-    "start": "expo start --go",
-    "start:tunnel": "expo start --go --tunnel",
+    "start": "expo start --lan --go --port 8081",
+    "start:tunnel": "powershell -ExecutionPolicy Bypass -File ./start-tunnel.ps1",
+    "start:tunnel:clean": "powershell -ExecutionPolicy Bypass -File ./start-tunnel.ps1",
     "android": "expo start --go --android",
+    "android:devclient": "expo run:android",
     "prebuild": "expo prebuild --platform android",
     "build:android": "expo prebuild --platform android && expo run:android",
     "prebuild:android": "expo prebuild --platform android",
     "ios": "expo run:ios",
     "web": "expo start --web"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "@expo/ngrok": "^4.1.3"
+  }
 }

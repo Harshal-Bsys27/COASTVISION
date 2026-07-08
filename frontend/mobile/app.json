@@ -2,6 +2,7 @@
   "expo": {
     "name": "mobile",
     "slug": "mobile",
+    "scheme": "coastvision",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -11,12 +12,7 @@
     },
     "android": {
       "package": "com.coastvision.app",
-      "usesCleartextTraffic": true,
-      "statusBar": {
-        "translucent": false,
-        "backgroundColor": "#071520",
-        "barStyle": "light-content"
-      },
+      "allowCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -32,3 +28,4 @@
     ]
   }
 }
+
