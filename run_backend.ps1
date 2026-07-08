@@ -6,11 +6,20 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$python = Join-Path $root "venv\Scripts\python.exe"
+$backendDir = Join-Path $root "backend"
+$pythonCandidates = @(
+  (Join-Path $root ".venv\Scripts\python.exe"),
+  (Join-Path $root "venv\Scripts\python.exe")
+)
+$python = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
-if (!(Test-Path $python)) {
-  Write-Host "venv not found at: $python" -ForegroundColor Red
-  Write-Host "Create it first: python -m venv venv" -ForegroundColor Yellow
+if (-not $python) {
+  Write-Host "Python virtual environment not found." -ForegroundColor Red
+  Write-Host "Expected one of:" -ForegroundColor Yellow
+  foreach ($candidate in $pythonCandidates) {
+    Write-Host "  - $candidate" -ForegroundColor Yellow
+  }
+  Write-Host "Create one with: python -m venv .venv" -ForegroundColor Yellow
   exit 1
 }
 
@@ -90,7 +99,7 @@ if ($Detach) {
     "-m", "waitress",
     "--listen=0.0.0.0:8000",
     "--threads=32",
-    "backend.server:app"
+    "server:app"
   )
 
   $logDir = Join-Path $root "data\logs"
@@ -98,7 +107,7 @@ if ($Detach) {
   $outLog = Join-Path $logDir "backend.out.log"
   $errLog = Join-Path $logDir "backend.err.log"
 
-  $p = Start-Process -FilePath $python -ArgumentList $args -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+  $p = Start-Process -FilePath $python -ArgumentList $args -WorkingDirectory $backendDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
   $pidFile = Join-Path $logDir "backend.pid.txt"
   Set-Content -Path $pidFile -Value $p.Id
 
@@ -108,4 +117,5 @@ if ($Detach) {
   exit 0
 }
 
-& $python -m waitress --listen=0.0.0.0:8000 --threads=32 backend.server:app
+Set-Location $backendDir
+& $python -m waitress --listen=0.0.0.0:8000 --threads=32 server:app

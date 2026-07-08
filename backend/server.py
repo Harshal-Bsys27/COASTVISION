@@ -484,6 +484,7 @@ def _init_crowd_alerts_csv():
 
 _init_crowd_alerts_csv()
 _init_crowd_thresholds()
+\
 
 # Crowd alert history in memory (for dashboard)
 CROWD_ALERT_HISTORY = deque(maxlen=200)  # Store recent crowd alerts
@@ -1138,12 +1139,34 @@ def _open_zone_caps():
         _zones[zid] = ZoneState(zid=zid, path=p, cap=cap, lock=threading.Lock())
 
 
+def _seed_initial_frame(st: ZoneState) -> None:
+    if st.last_jpeg is not None:
+        return
+    try:
+        with st.lock:
+            if st.cap is None:
+                return
+            st.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = st.cap.read()
+            if not ok or frame is None:
+                return
+            frame = _resize_for_speed(frame)
+            ok2, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+            if ok2:
+                st.last_jpeg = jpg.tobytes()
+                st.last_ts = time.time()
+                st.last_error = None
+    except Exception as exc:
+        st.last_error = f"seed_initial_frame_failed: {exc}"
+
+
 def _ensure_zone_thread(zid: int):
     if zid in _zone_threads:
         return
     st = _zones.get(zid)
     if not st:
         return
+    _seed_initial_frame(st)
     th = threading.Thread(target=_zone_worker, args=(zid,), daemon=True)
     th.start()
     _zone_threads[zid] = th
@@ -1287,6 +1310,7 @@ def _annotate(frame, zid: int):
 def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
     interval = 1.0 / max(1, fps)
     st = _zones[zid]
+    _seed_initial_frame(st)
 
     while True:
         # If the zone was removed (video deleted), stop this worker.
@@ -1341,34 +1365,41 @@ def _zone_worker(zid: int, fps: int = COASTVISION_FPS):
                             _start_hls_encoder(st, w, h, fps)
                         _feed_hls_frame(st, frame)
 
-                    # Higher JPEG quality (88) for crisp detection boxes and smooth video
+                    # Encode the current frame immediately so the mobile UI sees a live image right away.
                     ok2, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
                     if ok2:
                         st.last_jpeg = jpg.tobytes()
-
-                        # Cache a smaller JPEG for the grid to keep 12+ zones smooth.
-                        try:
-                            gf = frame
-                            gh, gw = gf.shape[:2]
-                            if COASTVISION_GRID_MAX_W > 0 and gw > COASTVISION_GRID_MAX_W:
-                                scale = COASTVISION_GRID_MAX_W / float(gw)
-                                gf = cv2.resize(
-                                    gf,
-                                    (int(gw * scale), int(gh * scale)),
-                                    interpolation=cv2.INTER_LINEAR,  # Better quality resize
-                                )
-                            okg, jpg_g = cv2.imencode(
-                                ".jpg",
-                                gf,
-                                [int(cv2.IMWRITE_JPEG_QUALITY), COASTVISION_GRID_JPEG_QUALITY],
-                            )
-                            if okg:
-                                st.last_jpeg_grid = jpg_g.tobytes()
-                        except Exception:
-                            pass
-
                         st.last_ts = time.time()
                         st.last_error = None
+
+                    # Cache a smaller JPEG for the grid to keep 12+ zones smooth.
+                    try:
+                        gf = frame
+                        gh, gw = gf.shape[:2]
+                        if COASTVISION_GRID_MAX_W > 0 and gw > COASTVISION_GRID_MAX_W:
+                            scale = COASTVISION_GRID_MAX_W / float(gw)
+                            gf = cv2.resize(
+                                gf,
+                                (int(gw * scale), int(gh * scale)),
+                                interpolation=cv2.INTER_LINEAR,
+                            )
+                        okg, jpg_g = cv2.imencode(
+                            ".jpg",
+                            gf,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), COASTVISION_GRID_JPEG_QUALITY],
+                        )
+                        if okg:
+                            st.last_jpeg_grid = jpg_g.tobytes()
+                    except Exception:
+                        pass
+
+                    if did_infer and frame is not None:
+                        try:
+                            ok3, jpg3 = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+                            if ok3:
+                                st.last_jpeg = jpg3.tobytes()
+                        except Exception:
+                            pass
                 else:
                     st.last_error = "read_failed"
         except Exception as e:
@@ -2177,12 +2208,28 @@ def lifeguard_login():
         lg["last_seen"] = time.time()
         _save_lifeguards()
 
+    avatar = lg.get("avatar")
+    thumb = lg.get("avatar_thumb")
+    host = request.host_url.rstrip("/")
+    if avatar and isinstance(avatar, str) and avatar.startswith("/"):
+        avatar = f"{host}{avatar}"
+    elif avatar and isinstance(avatar, str) and not avatar.startswith(("http://", "https://", "data:")):
+        avatar = f"{host}/{avatar.lstrip('/')}"
+    if thumb and isinstance(thumb, str) and thumb.startswith("/"):
+        thumb = f"{host}{thumb}"
+    elif thumb and isinstance(thumb, str) and not thumb.startswith(("http://", "https://", "data:")):
+        thumb = f"{host}/{thumb.lstrip('/')}"
+
     return jsonify({
         "id": lg_id,
         "name": lg.get("name"),
         "phone": lg.get("phone"),
         "zones": lg.get("zones", []),
         "session_token": session_token,
+        "avatar": avatar,
+        "avatar_url": avatar,
+        "avatar_thumb": thumb,
+        "avatar_thumb_url": thumb,
         "message": "Login successful"
     })
 
@@ -2205,8 +2252,12 @@ def lifeguard_me():
         thumb = lg_copy.get("avatar_thumb")
         if avatar and isinstance(avatar, str) and avatar.startswith("/"):
             lg_copy["avatar"] = f"{host}{avatar}"
+        elif avatar and isinstance(avatar, str) and not avatar.startswith(("http://", "https://", "data:")):
+            lg_copy["avatar"] = f"{host}/{avatar.lstrip('/')}"
         if thumb and isinstance(thumb, str) and thumb.startswith("/"):
             lg_copy["avatar_thumb"] = f"{host}{thumb}"
+        elif thumb and isinstance(thumb, str) and not thumb.startswith(("http://", "https://", "data:")):
+            lg_copy["avatar_thumb"] = f"{host}/{thumb.lstrip('/')}"
 
         # Only return common profile fields (include avatar URLs when present)
         return jsonify({
@@ -2217,7 +2268,9 @@ def lifeguard_me():
             "online": lg_copy.get("online", False),
             "last_seen": lg_copy.get("last_seen"),
             "avatar": lg_copy.get("avatar"),
+            "avatar_url": lg_copy.get("avatar"),
             "avatar_thumb": lg_copy.get("avatar_thumb"),
+            "avatar_thumb_url": lg_copy.get("avatar_thumb"),
         })
 
 
@@ -2249,10 +2302,18 @@ def list_lifeguards():
             lg_copy = dict(lg)
             avatar = lg_copy.get("avatar")
             thumb = lg_copy.get("avatar_thumb")
-            if avatar and avatar.startswith("/"):
+            if avatar and isinstance(avatar, str) and avatar.startswith("/"):
                 lg_copy["avatar"] = f"{host}{avatar}"
-            if thumb and thumb.startswith("/"):
+            elif avatar and isinstance(avatar, str) and not avatar.startswith(("http://", "https://", "data:")):
+                lg_copy["avatar"] = f"{host}/{avatar.lstrip('/')}"
+            if thumb and isinstance(thumb, str) and thumb.startswith("/"):
                 lg_copy["avatar_thumb"] = f"{host}{thumb}"
+            elif thumb and isinstance(thumb, str) and not thumb.startswith(("http://", "https://", "data:")):
+                lg_copy["avatar_thumb"] = f"{host}/{thumb.lstrip('/')}"
+            if "avatar_url" not in lg_copy:
+                lg_copy["avatar_url"] = lg_copy.get("avatar")
+            if "avatar_thumb_url" not in lg_copy:
+                lg_copy["avatar_thumb_url"] = lg_copy.get("avatar_thumb")
             lifeguards_out.append(lg_copy)
         return jsonify({
             "lifeguards": lifeguards_out,
@@ -2271,10 +2332,16 @@ def get_lifeguard(lg_id: str):
         host = request.host_url.rstrip("/")
         avatar = lg_copy.get("avatar")
         thumb = lg_copy.get("avatar_thumb")
-        if avatar and avatar.startswith("/"):
+        if avatar and isinstance(avatar, str) and avatar.startswith("/"):
             lg_copy["avatar"] = f"{host}{avatar}"
-        if thumb and thumb.startswith("/"):
+        elif avatar and isinstance(avatar, str) and not avatar.startswith(("http://", "https://", "data:")):
+            lg_copy["avatar"] = f"{host}/{avatar.lstrip('/')}"
+        if thumb and isinstance(thumb, str) and thumb.startswith("/"):
             lg_copy["avatar_thumb"] = f"{host}{thumb}"
+        elif thumb and isinstance(thumb, str) and not thumb.startswith(("http://", "https://", "data:")):
+            lg_copy["avatar_thumb"] = f"{host}/{thumb.lstrip('/')}"
+        lg_copy["avatar_url"] = lg_copy.get("avatar")
+        lg_copy["avatar_thumb_url"] = lg_copy.get("avatar_thumb")
         return jsonify(lg_copy)
 
 
