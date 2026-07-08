@@ -13,10 +13,14 @@ import { colors, layout, spacing } from "../theme";
 export default function ZoneDetailScreen({ route }) {
   const navigation = useNavigation();
   const { width } = useWindowDimensions();
-  const { zone } = route.params;
+  const zoneParam = route?.params?.zone ?? route?.params ?? {};
+  const zoneId = zoneParam?.id ?? zoneParam?.zone ?? route?.params?.zoneId ?? null;
+  const zoneName = zoneParam?.name ?? zoneParam?.zoneName ?? (zoneId ? `Zone ${zoneId}` : "Zone");
+  const zone = zoneParam && typeof zoneParam === "object" ? { ...zoneParam, id: zoneId, name: zoneName } : { id: zoneId, name: zoneName };
   const { api, assignedZones, streamQuality } = useApiContext();
   const [detections, setDetections] = useState({ count: 0, items: [] });
-  const allowed = isZoneAllowed(zone.id, assignedZones);
+  const [detailReady, setDetailReady] = useState(Boolean(zoneId));
+  const allowed = isZoneAllowed(zoneId, assignedZones);
 
   // Calculate responsive video height based on screen width
   // Use 16:9 aspect ratio for most video content
@@ -24,9 +28,9 @@ export default function ZoneDetailScreen({ route }) {
   const videoHeight = Math.round(videoContainerWidth / (16 / 9));
 
   const detectionsPoll = usePollApi(
-    () => api.detections(zone.id),
+    () => (zoneId ? api.detections(zoneId) : Promise.resolve({ count: 0, items: [] })),
     POLL_DETECTIONS_MS,
-    allowed,
+    allowed && Boolean(zoneId),
     { count: 0, items: [] }
   );
 
@@ -41,6 +45,16 @@ export default function ZoneDetailScreen({ route }) {
       setDetections(detectionsPoll.data);
     }
   }, [detectionsPoll.data]);
+
+  useEffect(() => {
+    setDetailReady(Boolean(zoneId));
+  }, [zoneId]);
+
+  useEffect(() => {
+    if (allowed && zoneId) {
+      detectionsPoll.refresh?.();
+    }
+  }, [allowed, zoneId, detectionsPoll.refresh]);
 
   if (!allowed) {
     return (
@@ -63,8 +77,13 @@ export default function ZoneDetailScreen({ route }) {
       <View style={styles.heroCard}>
         <Text style={styles.heroEyebrow}>Zone Monitor</Text>
         <Text variant="headlineSmall" style={styles.title}>
-          {zone.name || `Zone ${zone.id}`}
+          {zone.name || zoneName || `Zone ${zoneId}`}
         </Text>
+        {zoneId ? (
+          <Text style={styles.subtitle}>Zone ID {zoneId}</Text>
+        ) : (
+          <Text style={styles.subtitle}>The selected zone is not available yet.</Text>
+        )}
       </View>
 
       <View style={styles.detailsCard}>
@@ -78,10 +97,11 @@ export default function ZoneDetailScreen({ route }) {
       </View>
 
       <ZoneVideoPlayer
-        frameUrl={api.frameUrl(zone.id)}
+        frameUrl={zoneId ? api.frameUrl(zoneId, 640) : null}
+        streamUrl={zoneId ? api.mjpegUrl(zoneId) : null}
         height={videoHeight}
         aspectRatio={16 / 9}
-        fps={Number(streamQuality)}
+        fps={Math.max(4, Number(streamQuality) || 6)}
       />
 
       <View style={styles.statsCard}>
@@ -314,3 +334,4 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 });
+

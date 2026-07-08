@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { ScrollView, StyleSheet, View, Image, Modal, TouchableOpacity, useWindowDimensions } from "react-native";
 import { ActivityIndicator, Button, Snackbar, Text, TextInput, SegmentedButtons } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -7,6 +7,7 @@ import ConnectionBanner from "../components/ConnectionBanner";
 import { useApiContext } from "../context/ApiContext";
 import { usePollApi } from "../hooks/usePollApi";
 import { POLL_HEALTH_MS } from "../shared/constants";
+import { normalizeBaseUrl } from "../shared/api";
 import { colors, spacing } from "../theme";
 
 function formatAssignedZones(zones) {
@@ -14,6 +15,52 @@ function formatAssignedZones(zones) {
     return "All zones";
   }
   return zones.map((z) => `Zone ${z}`).join(", ");
+}
+
+function createFallbackAvatarUri(name = "LF") {
+  const initials = String(name || "LF")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0] || "")
+    .join("")
+    .toUpperCase() || "LF";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240"><rect width="100%" height="100%" rx="120" fill="#1f4d7a"/><circle cx="120" cy="90" r="36" fill="#8bd9ff"/><path d="M50 200c12-34 40-52 70-52s58 18 70 52" fill="#8bd9ff"/><text x="120" y="220" text-anchor="middle" font-family="Arial, sans-serif" font-size="72" font-weight="700" fill="#ffffff">${initials}</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function resolveAvatarUri(profile, baseUrl) {
+  const candidate = profile?.avatar_thumb_url || profile?.avatar_url || profile?.avatar_thumb || profile?.avatar;
+  if (!candidate || typeof candidate !== "string") {
+    return null;
+  }
+
+  if (candidate.startsWith("data:")) {
+    return null;
+  }
+
+  const normalizedBase = normalizeBaseUrl(baseUrl);
+  if (candidate.startsWith("/")) {
+    return normalizedBase ? `${normalizedBase}${candidate}` : candidate;
+  }
+
+  if (/^https?:\/\//i.test(candidate)) {
+    try {
+      const parsed = new URL(candidate);
+      const base = normalizedBase ? new URL(normalizedBase) : null;
+      if (base && ["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(parsed.hostname)) {
+        return `${base.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+      }
+      if (base && parsed.origin === base.origin) {
+        return `${base.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+      }
+      return normalizedBase ? `${normalizedBase}${parsed.pathname}${parsed.search}${parsed.hash}` : candidate;
+    } catch {
+      return normalizedBase ? `${normalizedBase}${candidate}` : candidate;
+    }
+  }
+
+  return normalizedBase ? `${normalizedBase}/${candidate.replace(/^\/+/, "")}` : candidate;
 }
 
 export default function SettingsScreen() {
@@ -26,6 +73,7 @@ export default function SettingsScreen() {
     connected,
     health,
     lifeguard,
+    sessionToken,
     assignedZones,
     saveBaseUrl,
     testConnection,
@@ -44,7 +92,17 @@ export default function SettingsScreen() {
   const [message, setMessage] = useState("");
   const [loggingOut, setLoggingOut] = useState(false);
   const [refreshingProfile, setRefreshingProfile] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [avatarPreviewVisible, setAvatarPreviewVisible] = useState(false);
+  const [avatarLoadError, setAvatarLoadError] = useState(false);
+  const fallbackAvatarUri = useMemo(() => createFallbackAvatarUri(lifeguard?.name || lifeguard?.id || "LF"), [lifeguard?.name, lifeguard?.id]);
+  const avatarUri = useMemo(
+    () => resolveAvatarUri(lifeguard, baseUrl),
+    [baseUrl, lifeguard?.avatar, lifeguard?.avatar_thumb, lifeguard?.avatar_url, lifeguard?.avatar_thumb_url, lifeguard?.name, lifeguard?.id]
+  );
+  const isRemoteAvatarUri = typeof avatarUri === "string" && /^(https?:\/\/)/i.test(avatarUri);
+  const showAvatarImage = Boolean(avatarUri) && isRemoteAvatarUri && !avatarLoadError;
+  const displayAvatarUri = avatarLoadError ? fallbackAvatarUri : avatarUri;
 
   const healthPoll = usePollApi(
     () => api.health(),
@@ -64,6 +122,10 @@ export default function SettingsScreen() {
   }, [baseUrl]);
 
   useEffect(() => {
+    setAvatarLoadError(false);
+  }, [avatarUri]);
+
+  useEffect(() => {
     if (healthPoll.data) {
       setConnected(true);
       setHealth(healthPoll.data);
@@ -74,9 +136,11 @@ export default function SettingsScreen() {
   }, [healthPoll.data, healthPoll.error, setConnected, setHealth, clearConnection]);
 
   useEffect(() => {
-    if (!isFocused || !lifeguard) return;
-    refreshLifeguard().catch(() => {});
-  }, [isFocused, lifeguard, refreshLifeguard]);
+    if (!isFocused || !baseUrl || !lifeguard?.id) return;
+    refreshLifeguard()
+      .then(() => setAvatarLoadError(false))
+      .catch(() => {});
+  }, [isFocused, baseUrl, lifeguard?.id, refreshLifeguard]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -104,6 +168,28 @@ export default function SettingsScreen() {
     }
   };
 
+  const handleUploadAvatar = async () => {
+    if (!lifeguard?.id) {
+      setMessage("Sign in again to sync your profile photo");
+      return;
+    }
+
+    setUploadingAvatar(true);
+    try {
+      const me = await refreshLifeguard();
+      const refreshedAvatar = resolveAvatarUri(me || lifeguard, baseUrl);
+      setAvatarLoadError(false);
+      if (refreshedAvatar) {
+        setMessage("Profile photo synced");
+      } else {
+        setMessage("No profile photo is available for this lifeguard yet");
+      }
+    } catch (err) {
+      setMessage(err.message || "Could not sync profile photo");
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -150,13 +236,22 @@ export default function SettingsScreen() {
             </View>
             <View style={[styles.profileCard, isWide && styles.sectionCardWide]}>
               <View style={styles.profileHeader}>
-                {lifeguard.avatar || lifeguard.avatar_thumb ? (
+                {showAvatarImage ? (
                   <TouchableOpacity onPress={() => setAvatarPreviewVisible(true)} activeOpacity={0.8}>
-                    <Image source={{ uri: lifeguard.avatar_thumb || lifeguard.avatar }} style={styles.avatar} />
+                    <View style={styles.avatarFrame}>
+                      <Image
+                        key={displayAvatarUri}
+                        source={{ uri: displayAvatarUri }}
+                        style={styles.avatar}
+                        onError={() => {
+                          setAvatarLoadError(true);
+                        }}
+                      />
+                    </View>
                   </TouchableOpacity>
                 ) : (
                   <View style={styles.avatarFallback}>
-                    <MaterialCommunityIcons name="account" size={28} color={colors.primary} />
+                    <Text style={styles.avatarInitials}>{(lifeguard?.name || lifeguard?.id || "LF").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "LF"}</Text>
                   </View>
                 )}
                 <Text variant="headlineSmall" style={styles.profileHeading}>
@@ -177,7 +272,8 @@ export default function SettingsScreen() {
                 >
                   <View style={styles.avatarModalContent}>
                     <Image
-                      source={{ uri: lifeguard.avatar_thumb || lifeguard.avatar }}
+                      key={avatarUri}
+                      source={{ uri: avatarUri }}
                       style={styles.avatarPreview}
                       resizeMode="contain"
                     />
@@ -185,6 +281,17 @@ export default function SettingsScreen() {
                   </View>
                 </TouchableOpacity>
               </Modal>
+              <View style={styles.profileActions}>
+                <Button
+                  mode="outlined"
+                  onPress={handleUploadAvatar}
+                  loading={uploadingAvatar}
+                  style={styles.uploadButton}
+                  contentStyle={styles.actionContent}
+                >
+                  Refresh Photo
+                </Button>
+              </View>
               <View style={styles.profileDetails}>
                 <View style={styles.infoRow}>
                   <Text style={styles.infoLabel}>Name</Text>
@@ -289,9 +396,9 @@ export default function SettingsScreen() {
             value={streamQuality}
             onValueChange={handleStreamQualityChange}
             buttons={[
-              { value: "3", label: "3 FPS (Low)" },
               { value: "5", label: "5 FPS (Balanced)" },
               { value: "10", label: "10 FPS (High)" },
+              { value: "15", label: "15 FPS (Smooth)" },
             ]}
             style={styles.segmentButtons}
           />
@@ -470,6 +577,9 @@ const styles = StyleSheet.create({
   profileActions: {
     gap: spacing.sm,
   },
+  uploadButton: {
+    borderColor: colors.primary,
+  },
   profileActionsWide: {
     flexDirection: "row",
     alignItems: "center",
@@ -494,6 +604,12 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(53,214,195,0.14)",
     borderWidth: 3,
     borderColor: "rgba(53,214,195,0.45)",
+  },
+  avatarInitials: {
+    color: colors.primary,
+    fontSize: 42,
+    fontWeight: "900",
+    letterSpacing: 1,
   },
   avatarModalOverlay: {
     flex: 1,
@@ -558,3 +674,4 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
 });
+

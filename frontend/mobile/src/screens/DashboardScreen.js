@@ -2,24 +2,82 @@ import React, { useCallback, useMemo, useState } from "react";
 import { FlatList, Image, RefreshControl, StyleSheet, View, useWindowDimensions, Alert } from "react-native";
 import { ActivityIndicator, Text, Button } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import ConnectionBanner from "../components/ConnectionBanner";
 import ZoneCard from "../components/ZoneCard";
 import { useApiContext } from "../context/ApiContext";
 import { usePollApi } from "../hooks/usePollApi";
 import { POLL_DETECTIONS_MS, POLL_HEALTH_MS, POLL_ZONES_MS } from "../shared/constants";
+import { normalizeBaseUrl } from "../shared/api";
 import { colors, spacing } from "../theme";
 import { filterZones } from "../utils/zoneFilter";
 
+function createFallbackAvatarUri(name = "LF") {
+  const initials = String(name || "LF")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0] || "")
+    .join("")
+    .toUpperCase() || "LF";
+  const bg = "#1f4d7a";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240"><rect width="100%" height="100%" rx="120" fill="${bg}"/><circle cx="120" cy="90" r="36" fill="#8bd9ff"/><path d="M50 200c12-34 40-52 70-52s58 18 70 52" fill="#8bd9ff"/><text x="120" y="220" text-anchor="middle" font-family="Arial, sans-serif" font-size="72" font-weight="700" fill="#ffffff">${initials}</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function resolveAvatarUri(profile, baseUrl) {
+  const candidate = profile?.avatar_thumb_url || profile?.avatar_url || profile?.avatar_thumb || profile?.avatar;
+  if (!candidate || typeof candidate !== "string") {
+    return null;
+  }
+
+  if (candidate.startsWith("data:")) {
+    return null;
+  }
+
+  const normalizedBase = normalizeBaseUrl(baseUrl);
+  if (candidate.startsWith("/")) {
+    return normalizedBase ? `${normalizedBase}${candidate}` : candidate;
+  }
+
+  if (/^https?:\/\//i.test(candidate)) {
+    try {
+      const parsed = new URL(candidate);
+      const base = normalizedBase ? new URL(normalizedBase) : null;
+      if (base && ["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(parsed.hostname)) {
+        return `${base.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+      }
+      if (base && parsed.origin === base.origin) {
+        return `${base.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+      }
+      return normalizedBase ? `${normalizedBase}${parsed.pathname}${parsed.search}${parsed.hash}` : candidate;
+    } catch {
+      return normalizedBase ? `${normalizedBase}${candidate}` : candidate;
+    }
+  }
+
+  return normalizedBase ? `${normalizedBase}/${candidate.replace(/^\/+/, "")}` : candidate;
+}
+
 export default function DashboardScreen() {
   const navigation = useNavigation();
+  const isFocused = useIsFocused();
   const { width } = useWindowDimensions();
-  const { baseUrl, api, connected, assignedZones, lifeguard, clearConnection, setConnected, streamQuality } = useApiContext();
+  const { baseUrl, api, connected, assignedZones, lifeguard, clearConnection, setConnected, streamQuality, refreshLifeguard } = useApiContext();
   const [detectionMap, setDetectionMap] = useState({});
   const [refreshing, setRefreshing] = useState(false);
   const [sosActive, setSosActive] = useState(false);
   const [multiZoneView, setMultiZoneView] = useState(true);
+  const [avatarLoadError, setAvatarLoadError] = useState(false);
+  const fallbackAvatarUri = useMemo(() => createFallbackAvatarUri(lifeguard?.name || lifeguard?.id || "LF"), [lifeguard?.name, lifeguard?.id]);
   const isLargeViewport = width >= 920;
+  const avatarUri = useMemo(
+    () => resolveAvatarUri(lifeguard, baseUrl),
+    [baseUrl, lifeguard?.avatar_url, lifeguard?.avatar, lifeguard?.avatar_thumb_url, lifeguard?.avatar_thumb, lifeguard?.name, lifeguard?.id]
+  );
+  const isRemoteAvatarUri = typeof avatarUri === "string" && /^(https?:\/\/)/i.test(avatarUri);
+  const showAvatarImage = Boolean(avatarUri) && isRemoteAvatarUri && !avatarLoadError;
+  const displayAvatarUri = avatarLoadError ? fallbackAvatarUri : avatarUri;
 
   const zonesPoll = usePollApi(
     () => api.zones(),
@@ -39,6 +97,17 @@ export default function DashboardScreen() {
 
   const allZones = zonesPoll.data?.items || [];
   const zones = useMemo(() => filterZones(allZones, assignedZones), [allZones, assignedZones]);
+  const placeholderZones = useMemo(() => {
+    if (zones.length || !baseUrl || !zonesPoll.loading) return [];
+    if (Array.isArray(assignedZones) && assignedZones.length > 0) {
+      return assignedZones.slice(0, Math.min(2, assignedZones.length)).map((zoneId, index) => ({
+        id: `placeholder-${zoneId || index}`,
+        name: `Zone ${zoneId}`,
+        placeholder: true,
+      }));
+    }
+    return [{ id: "placeholder-1", name: "Loading zone", placeholder: true }];
+  }, [assignedZones, baseUrl, zones.length, zonesPoll.loading]);
   const isSingleZone = zones.length <= 1;
   const canMultiColumn = zones.length > 1 && width >= 760;
   const cardColumns = multiZoneView && canMultiColumn ? 2 : 1;
@@ -83,12 +152,23 @@ export default function DashboardScreen() {
   }, [baseUrl, zones, loadDetections]);
 
   React.useEffect(() => {
+    setAvatarLoadError(false);
+  }, [avatarUri]);
+
+  React.useEffect(() => {
     if (zonesPoll.error) {
       clearConnection();
     } else if (zonesPoll.data) {
       setConnected(true);
     }
   }, [zonesPoll.data, zonesPoll.error, clearConnection, setConnected]);
+
+  React.useEffect(() => {
+    if (!isFocused || !baseUrl || !lifeguard?.id) return;
+    refreshLifeguard()
+      .then(() => setAvatarLoadError(false))
+      .catch(() => {});
+  }, [isFocused, baseUrl, lifeguard?.id, refreshLifeguard]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -136,7 +216,7 @@ export default function DashboardScreen() {
       );
     }
 
-    if (zonesPoll.loading && zones.length === 0) {
+    if (zonesPoll.loading && zones.length === 0 && placeholderZones.length === 0) {
       return (
         <View style={styles.centered}>
           <ActivityIndicator color={colors.primary} />
@@ -144,7 +224,7 @@ export default function DashboardScreen() {
       );
     }
 
-    if (zones.length === 0) {
+    if (zones.length === 0 && placeholderZones.length === 0) {
       return (
         <View style={styles.centered}>
           <Text style={styles.emptyTitle}>
@@ -159,10 +239,12 @@ export default function DashboardScreen() {
       );
     }
 
+    const activeZones = zones.length ? zones : placeholderZones;
+
     return (
       <FlatList
         key={`zones-${cardColumns}`}
-        data={zones}
+        data={activeZones}
         numColumns={cardColumns}
         keyExtractor={(item) => String(item.id)}
         contentContainerStyle={[styles.list, isSingleZone && styles.listSingle]}
@@ -214,16 +296,16 @@ export default function DashboardScreen() {
               zone={item}
               index={index}
               personCount={detectionMap[item.id] ?? 0}
-              frameUrl={api.frameUrl(item.id, 640)}
+              frameUrl={item.placeholder ? null : api.frameUrl(item.id, 640)}
               streamHeight={zoneStreamHeight}
               fps={streamQuality}
-              onPress={() => navigation.navigate("ZoneDetail", { zone: item })}
+              onPress={() => !item.placeholder && navigation.navigate("ZoneDetail", { zone: item })}
             />
           </View>
         )}
       />
     );
-  }, [allZones, assignedZones, api, baseUrl, cardColumns, detectionMap, isSingleZone, navigation, onRefresh, refreshing, zoneStreamHeight, zones, zonesPoll.loading]);
+  }, [allZones, api, assignedZones, baseUrl, cardColumns, detectionMap, isSingleZone, navigation, onRefresh, placeholderZones, refreshing, zoneStreamHeight, zones, zonesPoll.loading]);
 
   return (
     <View style={styles.container}>
@@ -234,11 +316,20 @@ export default function DashboardScreen() {
       </View>
       {lifeguard ? (
         <View style={styles.scopeBanner}>
-          {lifeguard.avatar_thumb || lifeguard.avatar ? (
-            <Image source={{ uri: lifeguard.avatar_thumb || lifeguard.avatar }} style={styles.avatar} />
+          {showAvatarImage ? (
+            <View style={styles.avatarFrame}>
+              <Image
+                key={displayAvatarUri}
+                source={{ uri: displayAvatarUri }}
+                style={styles.avatar}
+                onError={() => {
+                  setAvatarLoadError(true);
+                }}
+              />
+            </View>
           ) : (
             <View style={styles.avatarFallback}>
-              <MaterialCommunityIcons name="account-circle" size={42} color={colors.primary} />
+              <Text style={styles.avatarInitials}>{(lifeguard?.name || lifeguard?.id || "LF").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "LF"}</Text>
             </View>
           )}
           <View style={styles.scopeTextWrap}>
@@ -366,8 +457,26 @@ const styles = StyleSheet.create({
     height: 80,
     borderRadius: 40,
     marginRight: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
+    borderWidth: 2,
+    borderColor: "rgba(53,214,195,0.25)",
+    backgroundColor: "rgba(16,34,53,0.9)",
+  },
+  avatarFallback: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    marginRight: spacing.sm,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "rgba(53,214,195,0.14)",
+    borderWidth: 2,
+    borderColor: "rgba(53,214,195,0.2)",
+  },
+  avatarInitials: {
+    color: colors.primary,
+    fontSize: 24,
+    fontWeight: "900",
+    letterSpacing: 0.6,
   },
   heroCard: {
     backgroundColor: colors.surface,
@@ -480,3 +589,4 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
 });
+

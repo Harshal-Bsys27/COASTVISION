@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Dimensions, Pressable, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
 import { ActivityIndicator, Text } from "react-native-paper";
 import { BarChart } from "react-native-chart-kit";
@@ -17,6 +17,8 @@ import {
 } from "../utils/zoneFilter";
 
 const chartWidth = Dimensions.get("window").width - spacing.md * 2;
+const PERSON_COUNT_REFRESH_MS = 6000;
+const CROWD_REFRESH_MS = 5000;
 
 const chartConfig = {
   backgroundColor: colors.surface,
@@ -53,7 +55,11 @@ function formatTimelineLabel(point) {
 }
 
 function getSmoothPath(points) {
-  if (!points || points.length < 2) return "";
+  if (!points || !points.length) return "";
+  if (points.length === 1) {
+    const point = points[0];
+    return `M ${point.x} ${point.y}`;
+  }
   const path = [`M ${points[0].x} ${points[0].y}`];
   for (let i = 0; i < points.length - 1; i += 1) {
     const p0 = i === 0 ? points[0] : points[i - 1];
@@ -215,6 +221,60 @@ function PersonCountLineChart({ labels, values, width, height, selectedIndex, on
   );
 }
 
+function MiniTrendChart({ values, width, height, color, fillColor }) {
+  const safeValues = Array.isArray(values) && values.length ? values : [0];
+  const gradientId = `trend-${String(color || "primary").replace(/[^a-zA-Z0-9]/g, "_")}`;
+  const padding = 14;
+  const chartWidth = Math.max(0, width - padding * 2);
+  const chartHeight = Math.max(0, height - padding * 2);
+  const dataMin = Math.min(...safeValues, 0);
+  const dataMax = Math.max(...safeValues, 0);
+  const range = dataMax - dataMin || 1;
+  const points = safeValues.map((value, index) => ({
+    x: padding + (chartWidth * index) / Math.max(safeValues.length - 1, 1),
+    y: padding + chartHeight - ((value - dataMin) * chartHeight) / range,
+    value,
+  }));
+  const linePath = getSmoothPath(points);
+  const baselineY = padding + chartHeight;
+  const fillPath = linePath
+    ? `${linePath} L ${points[points.length - 1].x} ${baselineY} L ${points[0].x} ${baselineY} Z`
+    : `M ${padding} ${baselineY} L ${padding} ${baselineY} Z`;
+
+  if (!points.length) return null;
+
+  return (
+    <Svg width={width} height={height}>
+      <Defs>
+        <LinearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+          <Stop offset="0%" stopColor={fillColor || `${color}22`} />
+          <Stop offset="100%" stopColor="rgba(15, 23, 42, 0)" />
+        </LinearGradient>
+      </Defs>
+      <Path d={fillPath} fill={`url(#${gradientId})`} />
+      <Path
+        d={linePath}
+        fill="none"
+        stroke={color || colors.primary}
+        strokeWidth={2.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      {points.map((point, index) => (
+        <Circle
+          key={`trend-point-${index}`}
+          cx={point.x}
+          cy={point.y}
+          r={index === points.length - 1 ? 4 : 3}
+          fill={color || colors.primary}
+          stroke="rgba(255,255,255,0.8)"
+          strokeWidth={1}
+        />
+      ))}
+    </Svg>
+  );
+}
+
 function normalizeCrowdZones(crowdStatus) {
   const raw = crowdStatus?.zones ?? crowdStatus?.items;
   if (!raw) return [];
@@ -272,6 +332,7 @@ export default function AnalyticsScreen() {
   const [timeline, setTimeline] = useState(null);
   const [crowdStatus, setCrowdStatus] = useState(null);
   const [crowdAlerts, setCrowdAlerts] = useState([]);
+  const [crowdTrendHistory, setCrowdTrendHistory] = useState({});
   const [crowdLastUpdated, setCrowdLastUpdated] = useState(null);
   const [expandedZone, setExpandedZone] = useState(null);
   const [responseTimes, setResponseTimes] = useState(null);
@@ -307,9 +368,9 @@ export default function AnalyticsScreen() {
   );
 
   const loadTab = useCallback(
-    async (tabId) => {
+    async (tabId, showLoading = true) => {
       if (!baseUrl) return;
-      setLoading(true);
+      if (showLoading) setLoading(true);
       setError(null);
       try {
         if (tabId === "overview") {
@@ -342,7 +403,7 @@ export default function AnalyticsScreen() {
       } catch (err) {
         setError(err.message);
       } finally {
-        setLoading(false);
+        if (showLoading) setLoading(false);
       }
     },
     [api, assignedZones, baseUrl, loadPersonCountTimeline, personCountZone?.id]
@@ -372,14 +433,32 @@ export default function AnalyticsScreen() {
   React.useEffect(() => {
     if (!baseUrl) return;
     if (!loadedTabs[activeTab]) {
-      loadTab(activeTab);
+      loadTab(activeTab, true);
     }
   }, [activeTab, baseUrl, loadTab, loadedTabs]);
+
+  useEffect(() => {
+    if (!baseUrl || activeTab !== "person_count") return undefined;
+    const activeZone = personZoneOptions.find((zone) => String(zone.id) === String(personCountZone?.id)) || personZoneOptions[0];
+    if (!activeZone) return undefined;
+    const timer = setInterval(() => {
+      loadPersonCountTimeline(activeZone);
+    }, PERSON_COUNT_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [activeTab, baseUrl, loadPersonCountTimeline, personCountZone?.id, personZoneOptions]);
+
+  useEffect(() => {
+    if (!baseUrl || activeTab !== "crowd") return undefined;
+    const timer = setInterval(() => {
+      loadTab("crowd", false);
+    }, CROWD_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [activeTab, baseUrl, loadTab]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await loadTab(activeTab);
+      await loadTab(activeTab, true);
     } finally {
       setRefreshing(false);
     }
@@ -434,6 +513,20 @@ export default function AnalyticsScreen() {
   }, [timeline]);
 
   const crowdZones = useMemo(() => normalizeCrowdZones(crowdStatus), [crowdStatus]);
+
+  useEffect(() => {
+    if (!crowdZones.length) return;
+    setCrowdTrendHistory((prev) => {
+      const next = { ...prev };
+      crowdZones.forEach((zone) => {
+        const zoneId = String(zone.zone ?? zone.id);
+        const count = Number(zone.person_count ?? zone.count ?? 0);
+        const prevSeries = Array.isArray(prev[zoneId]) ? prev[zoneId] : [];
+        next[zoneId] = [...prevSeries, { timestamp: Date.now(), count }].slice(-8);
+      });
+      return next;
+    });
+  }, [crowdZones]);
 
   const crowdZoneSummary = useMemo(() => {
     const zones = crowdZones || [];
@@ -512,6 +605,19 @@ export default function AnalyticsScreen() {
   }, [crowdAlerts]);
 
   const topCrowdAlertZones = useMemo(() => crowdAlertsByZone.slice(0, 3), [crowdAlertsByZone]);
+
+  const personCountTrend = useMemo(() => {
+    const points = timeline?.timeline || [];
+    if (!points.length) return null;
+    const slice = points.slice(-8);
+    const values = slice.map((point) => Number(point.count ?? point.person_count ?? 0));
+    const delta = (values[values.length - 1] ?? 0) - (values[0] ?? 0);
+    return {
+      values,
+      delta,
+      trend: getTrendLabel(delta),
+    };
+  }, [timeline]);
 
   const crowdChart = useMemo(() => {
     if (!crowdZones.length) return null;
@@ -674,6 +780,12 @@ export default function AnalyticsScreen() {
               <View style={styles.statCardWide}>
                 <Text style={styles.statValue}>{latestPersonCount}</Text>
                 <Text style={styles.statLabel}>Current person count</Text>
+                {personCountTrend ? (
+                  <View style={styles.trendRow}>
+                    <Text style={styles.trendLabel}>Trend</Text>
+                    <Text style={[styles.trendValue, { color: personCountTrend.trend.color }]}>{personCountTrend.trend.label}</Text>
+                  </View>
+                ) : null}
               </View>
             )}
             {timelineChart ? (
@@ -738,6 +850,26 @@ export default function AnalyticsScreen() {
                 <View style={styles.trendRow}>
                   <Text style={styles.trendLabel}>Trend</Text>
                   <Text style={[styles.trendValue, { color: crowdZoneSummary.trend.color }]}>{crowdZoneSummary.trend.label}</Text>
+                </View>
+                <View style={styles.trendChartCard}>
+                  <View style={styles.trendChartHeader}>
+                    <Text style={styles.trendChartLabel}>Live crowd trend</Text>
+                    <Text style={styles.trendChartValue}>{crowdZoneSummary.topZone?.zone_name || "Overall"}</Text>
+                  </View>
+                  <MiniTrendChart
+                    values={(() => {
+                      const zoneId = crowdZoneSummary.topZone ? String(crowdZoneSummary.topZone.zone ?? crowdZoneSummary.topZone.id ?? "") : "";
+                      const trendSeries = zoneId ? (crowdTrendHistory[zoneId] || []) : [];
+                      if (trendSeries.length) {
+                        return trendSeries.map((point) => point.count);
+                      }
+                      return crowdZones.map((zone) => Number(zone.person_count ?? zone.count ?? 0));
+                    })()}
+                    width={chartWidth - 24}
+                    height={84}
+                    color={crowdZoneSummary.risk.color}
+                    fillColor={`${crowdZoneSummary.risk.color}22`}
+                  />
                 </View>
               </View>
             ) : null}
@@ -1665,3 +1797,4 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
   },
 });
+
