@@ -1,6 +1,6 @@
 # CoastVision
 
-AI-powered coastal surveillance system for **multi-zone beach monitoring**, **drowning-risk detection**, and **real-time alerting** — built with a **Flask + YOLO** backend and a **React (Vite) dashboard**.Currently under progress for a upgradation of model accuracy and better optimization on diverse dataset
+AI-powered coastal surveillance system for **multi-zone beach monitoring**, **drowning-risk detection**, and **real-time alerting** — built with a **Flask + YOLO** backend and a **React (Vite) dashboard**.Currently under progress for a upgradation of model accuracy and better optimization on diverse dataset and lifeguard app development .
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Flask](https://img.shields.io/badge/Backend-Flask-black)
@@ -64,6 +64,12 @@ CoastVision is an end-to-end coastal/pool safety monitoring project designed to 
 ### Lifeguard Operations + Telegram
 - Lifeguard registration + zone assignment + alert routing
 - Telegram notifications and controls through dashboard UI
+
+
+### Lifeguard Operations Mobile app 
+-  zone assignment + alert routing
+- a proper mobile app showing lifeguard command deck having zone currently assigned to the lifeguard
+- Analytics section which shows real time analytics for assigned zones 
 
 ---
 
