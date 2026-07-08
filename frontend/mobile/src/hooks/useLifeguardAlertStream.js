@@ -80,3 +80,4 @@ export function useLifeguardAlertStream(baseUrl, lifeguardId, sessionToken, onEv
     };
   }, [baseUrl, lifeguardId, sessionToken, enabled]);
 }
+

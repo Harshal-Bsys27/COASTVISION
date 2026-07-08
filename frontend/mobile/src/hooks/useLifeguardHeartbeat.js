@@ -15,3 +15,4 @@ export function useLifeguardHeartbeat(api, lifeguardId, enabled = true) {
     return () => clearInterval(timer);
   }, [api, lifeguardId, enabled]);
 }
+

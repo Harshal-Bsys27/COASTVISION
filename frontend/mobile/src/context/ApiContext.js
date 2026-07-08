@@ -19,7 +19,7 @@ export function ApiProvider({ children }) {
   const [health, setHealth] = useState(null);
   const [sessionToken, setSessionToken] = useState("");
   const [lifeguard, setLifeguard] = useState(null);
-  const [streamQuality, setStreamQuality] = useState("5");
+  const [streamQuality, setStreamQuality] = useState("10");
   const sessionTokenRef = useRef("");
 
   useEffect(() => {
@@ -291,3 +291,4 @@ export function useApiContext() {
   }
   return context;
 }
+

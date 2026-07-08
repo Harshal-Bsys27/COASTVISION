@@ -27,3 +27,4 @@ export function useAlertNotifications(alerts, enabled = true) {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
   }, [alerts, enabled]);
 }
+

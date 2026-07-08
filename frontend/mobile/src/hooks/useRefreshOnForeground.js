@@ -14,3 +14,4 @@ export function useRefreshOnForeground(refreshFn, enabled = true) {
     return () => subscription.remove();
   }, [refreshFn, enabled]);
 }
+

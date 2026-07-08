@@ -98,3 +98,4 @@ export function usePollApi(
 
   return { data, loading, error, refresh };
 }
+
