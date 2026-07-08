@@ -53,3 +53,4 @@ export function filterByZoneField(items, assignedZones, getZoneId = (item) => it
   if (!hasZoneRestriction(assignedZones)) return items;
   return items.filter((item) => isZoneAllowed(getZoneId(item), assignedZones));
 }
+

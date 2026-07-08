@@ -257,3 +257,4 @@ export function getEventSeverityColor(event, colors) {
       return colors.textMuted;
   }
 }
+

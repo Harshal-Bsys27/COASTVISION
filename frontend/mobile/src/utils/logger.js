@@ -43,3 +43,4 @@ export function logPollFailure(debugName, error) {
 
   console.warn(PREFIX, `${debugName} poll failed`, details);
 }
+

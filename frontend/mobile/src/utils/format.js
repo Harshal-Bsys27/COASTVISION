@@ -22,3 +22,4 @@ export function getSeverityColor(label, colors) {
   if (normalized.includes("crowd")) return colors.warning;
   return colors.textMuted;
 }
+

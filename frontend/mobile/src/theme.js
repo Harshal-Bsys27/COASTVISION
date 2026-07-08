@@ -27,3 +27,4 @@ export const layout = {
   tabChipBarHeight: 52,
   tabChipHeight: 36,
 };
+

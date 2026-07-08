@@ -132,9 +132,11 @@ export function createApi(baseUrl, getToken) {
     hlsUrl: (zid) => `${normalizeBaseUrl(baseUrl)}/api/zones/${zid}/hls/stream.m3u8`,
     frameUrl: (zid, width) => {
       const base = normalizeBaseUrl(baseUrl);
-      const w = width ? `&w=${width}` : "";
-      return `${base}/api/zones/${zid}/frame.jpg?t=${Date.now()}${w}`;
+      const query = [];
+      if (width) query.push(`w=${width}`);
+      return `${base}/api/zones/${zid}/frame.jpg${query.length ? `?${query.join("&")}` : ""}`;
     },
     mjpegUrl: (zid) => `${normalizeBaseUrl(baseUrl)}/api/zones/${zid}/stream.mjpg`,
   };
 }
+
