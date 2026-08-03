@@ -8,6 +8,8 @@ AI-powered coastal surveillance system for **multi-zone beach monitoring**, **dr
 ![YOLO](https://img.shields.io/badge/Model-Ultralytics%20YOLO-111827)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20focused-2563eb)
 
+Banner image :
+
 ---
 
 ## Table of Contents
