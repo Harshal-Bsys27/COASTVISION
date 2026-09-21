@@ -270,9 +270,14 @@ def _check_crowd_density(zid: int, person_count: int):
                     "severity": severity,
                     "timestamp": now,
                     "ts": datetime.now(timezone.utc).isoformat(),
-                    "label": "Crowd Density"
+                    "label": "Crowd Density",
+                    "category": "crowd_alert",
+                    "alert_id": f"crowd_{zid}_{int(now * 1000)}_{uuid.uuid4().hex[:8]}"
                 }
                 
+                if not alert.get("alert_id"):
+                    alert["alert_id"] = f"crowd_{zid}_{int(now * 1000)}_{uuid.uuid4().hex[:8]}"
+                ALERT_SENT_TIMES[alert["alert_id"]] = now
                 CROWD_ALERT_HISTORY.appendleft(alert)
                 CROWD_ALERT_LAST_TIME[zid] = now
                 
@@ -404,13 +409,44 @@ _response_lock = threading.Lock()
 
 # Create response times CSV headers if it doesn't exist
 def _init_response_times_csv():
-    if not RESPONSE_TIMES_CSV_PATH.exists():
-        try:
+    headers = ["timestamp", "zone", "lifeguard_id", "lifeguard_name", "alert_id", "response_time_seconds", "alert_sent_at", "responded_at", "response_status", "category"]
+    try:
+        ALERTS_DIR.mkdir(parents=True, exist_ok=True)
+        if not RESPONSE_TIMES_CSV_PATH.exists():
             with open(RESPONSE_TIMES_CSV_PATH, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["timestamp", "zone", "lifeguard_id", "lifeguard_name", "response_time_seconds", "alert_sent_at", "responded_at"])
-        except Exception as e:
-            print(f"[response] Error creating response times CSV: {e}")
+                csv.writer(f).writerow(headers)
+            return
+
+        with open(RESPONSE_TIMES_CSV_PATH, "r", newline="") as f:
+            reader = csv.reader(f)
+            existing_headers = next(reader, [])
+            raw_rows = list(reader)
+        needs_rewrite = existing_headers != headers
+        if not needs_rewrite:
+            needs_rewrite = any(
+                len(raw) >= 7
+                and not raw[4]
+                and len(raw) > 5
+                and "_" in raw[5]
+                for raw in raw_rows
+            )
+
+        if needs_rewrite:
+            with open(RESPONSE_TIMES_CSV_PATH, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+                for raw in raw_rows:
+                    if len(raw) >= 10:
+                        values = raw[:10]
+                    elif len(raw) >= 9:
+                        values = raw[:9] + [""]
+                    elif len(raw) >= 5:
+                        values = raw[:4] + [""] + raw[4:8] + [""]
+                    else:
+                        values = raw + [""] * (len(headers) - len(raw))
+                    writer.writerow(dict(zip(headers, values)))
+    except Exception as e:
+        print(f"[response] Error creating response times CSV: {e}")
 
 # Call on startup
 _init_response_times_csv()
@@ -529,6 +565,17 @@ def _save_lifeguards():
     except Exception as e:
         print(f"[lifeguard] Error saving lifeguards: {e}")
 
+
+def _zone_matches_assignment(zone: Any, assigned_zones: Any) -> bool:
+    """Compare zone IDs consistently when JSON stores them as strings or integers."""
+    if not assigned_zones:
+        return True
+    try:
+        zone_id = int(zone)
+        return any(int(assigned) == zone_id for assigned in assigned_zones)
+    except (TypeError, ValueError):
+        return str(zone) in {str(assigned) for assigned in assigned_zones}
+
 _load_lifeguards()
 
 def _broadcast_alert_to_lifeguards(alert: dict):
@@ -547,7 +594,7 @@ def _broadcast_alert_to_lifeguards(alert: dict):
         for lg_id, lg in LIFEGUARDS.items():
             # Send to lifeguards assigned to this zone OR all zones (empty list = all)
             assigned = lg.get("zones", [])
-            if not assigned or zone in assigned:
+            if _zone_matches_assignment(zone, assigned):
                 # Add to their alert queue
                 if lg_id not in LIFEGUARD_ALERTS:
                     LIFEGUARD_ALERTS[lg_id] = deque(maxlen=100)
@@ -1906,6 +1953,7 @@ def response_times_analytics():
     recent_responses = []
     by_zone = {}
     by_lifeguard = {}
+    by_status = {}
     
     try:
         with open(RESPONSE_TIMES_CSV_PATH, "r") as f:
@@ -1916,18 +1964,36 @@ def response_times_analytics():
                     zone = row.get("zone", "")
                     lg_id = row.get("lifeguard_id", "")
                     lg_name = row.get("lifeguard_name", "")
+                    category = (row.get("category") or "unknown").strip() or "unknown"
                     
                     # Filter by zone if specified
                     if zone_filter and zone != zone_filter:
                         continue
                     
                     response_times.append(response_sec)
+                    response_status = row.get("response_status", "acknowledged") or "acknowledged"
+                    alert_id_value = str(row.get("alert_id") or "")
+                    matching_crowd_alert = next(
+                        (
+                            alert for alert in CROWD_ALERT_HISTORY
+                            if str(alert.get("alert_id") or "") == alert_id_value
+                        ),
+                        None,
+                    )
+                    if not category or category == "unknown":
+                        category = "high_crowd_alert" if alert_id_value.startswith("crowd_") or matching_crowd_alert else "alert"
+                    elif category == "crowd_alert":
+                        category = "high_crowd_alert"
+                    by_status[response_status] = by_status.get(response_status, 0) + 1
                     recent_responses.append({
                         "timestamp": row.get("timestamp", ""),
                         "zone": zone,
                         "lifeguard_id": lg_id,
                         "lifeguard_name": lg_name,
+                        "alert_id": row.get("alert_id", ""),
                         "response_time_seconds": response_sec,
+                        "response_status": response_status,
+                        "category": category,
                         "alert_sent_at": row.get("alert_sent_at", ""),
                         "responded_at": row.get("responded_at", "")
                     })
@@ -1982,6 +2048,7 @@ def response_times_analytics():
         },
         "by_zone": zone_stats,
         "by_lifeguard": lifeguard_stats,
+        "by_status": by_status,
         "recent": recent_responses[-limit:] if recent_responses else []
     })
 
@@ -2086,13 +2153,27 @@ def crowd_alerts():
             for alert in list(CROWD_ALERT_HISTORY):
                 if zone_filter and str(alert.get("zone")) != str(zone_filter):
                     continue
+                normalized = dict(alert)
+                if not normalized.get("alert_id"):
+                    normalized["alert_id"] = f"crowd_{normalized.get('zone', 'unknown')}_{int(float(normalized.get('timestamp', time.time())) * 1000)}_{uuid.uuid4().hex[:8]}"
+                normalized["category"] = normalized.get("category") or "crowd_alert"
+                normalized["label"] = normalized.get("label") or "Crowd Density"
+                normalized["zone_name"] = _get_zone_display_name(normalized.get("zone"))
+                if normalized.get("alert_id") not in ALERT_SENT_TIMES and normalized.get("timestamp") is not None:
+                    try:
+                        ALERT_SENT_TIMES[normalized["alert_id"]] = float(normalized["timestamp"])
+                    except Exception:
+                        pass
                 alerts.append({
-                    "timestamp": alert.get("ts"),
-                    "zone": alert.get("zone"),
-                    "zone_name": _get_zone_display_name(alert.get("zone")),
-                    "person_count": alert.get("person_count"),
-                    "threshold": alert.get("threshold"),
-                    "severity": alert.get("severity"),
+                    "timestamp": normalized.get("ts") or normalized.get("timestamp"),
+                    "zone": normalized.get("zone"),
+                    "zone_name": normalized["zone_name"],
+                    "person_count": normalized.get("person_count"),
+                    "threshold": normalized.get("threshold"),
+                    "severity": normalized.get("severity"),
+                    "alert_id": normalized.get("alert_id"),
+                    "category": normalized.get("category"),
+                    "label": normalized.get("label"),
                 })
                 if len(alerts) >= limit:
                     break
@@ -2476,7 +2557,7 @@ def get_lifeguard_alerts(lg_id: str):
         # Get alerts from history for assigned zones
         alerts = []
         for a in list(ALERT_HISTORY):
-            if not assigned_zones or a.get("zone") in assigned_zones:
+            if _zone_matches_assignment(a.get("zone"), assigned_zones):
                 alerts.append(a)
                 if len(alerts) >= limit:
                     break
@@ -2495,8 +2576,14 @@ def lifeguard_respond(lg_id: str):
     data = request.get_json() or {}
     alert_id = data.get("alert_id")
     zone = data.get("zone")
+    response_status = str(data.get("status", "acknowledged")).strip().lower()
+    if response_status not in {"acknowledged", "en_route", "resolved"}:
+        return jsonify({"error": "Invalid response status"}), 400
+    if not alert_id:
+        return jsonify({"error": "Missing alert_id"}), 400
     
     response_time_seconds = None
+    alert_category = "unknown"
     
     with _lifeguard_lock:
         if lg_id not in LIFEGUARDS:
@@ -2504,36 +2591,100 @@ def lifeguard_respond(lg_id: str):
         
         lg = LIFEGUARDS[lg_id]
         responded_at = datetime.now(timezone.utc)
+
+        # Accept the persisted CSV event id as a fallback for older mobile clients.
+        if alert_id and alert_id not in ALERT_SENT_TIMES:
+            for alert in list(ALERT_HISTORY) + list(CROWD_ALERT_HISTORY):
+                if str(alert.get("event_id")) == str(alert_id):
+                    alert_id = alert.get("alert_id") or alert_id
+                    break
         
-        # Calculate response time if we have the alert sent time
+        matched_alert = None
+        if alert_id:
+            for alert in list(ALERT_HISTORY) + list(CROWD_ALERT_HISTORY):
+                if str(alert.get("alert_id")) == str(alert_id) or str(alert.get("event_id")) == str(alert_id):
+                    matched_alert = alert
+                    break
+        if matched_alert is None and zone is not None:
+            for alert in list(CROWD_ALERT_HISTORY) + list(ALERT_HISTORY):
+                if str(alert.get("zone")) == str(zone):
+                    matched_alert = alert
+                    break
+            if matched_alert is not None and matched_alert.get("alert_id"):
+                alert_id = str(matched_alert.get("alert_id"))
+        if matched_alert is not None:
+            alert_category = str(matched_alert.get("category") or matched_alert.get("label") or "unknown").lower().replace(" ", "_")
+        
+        # Calculate response time if we have the alert sent time. If the alert is
+        # a crowd alert or older data missing its exact ID, fall back to the alert's
+        # original timestamp so the dashboard still records a proper recent response.
+        alert_sent_time = None
         if alert_id and alert_id in ALERT_SENT_TIMES:
             alert_sent_time = ALERT_SENT_TIMES[alert_id]
-            response_time_seconds = time.time() - alert_sent_time
-            
-            # Log to CSV
+        elif matched_alert is not None:
+            raw_ts = matched_alert.get("timestamp") or matched_alert.get("ts")
             try:
-                with open(RESPONSE_TIMES_CSV_PATH, "a", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        datetime.now(timezone.utc).isoformat(),
-                        zone,
-                        lg_id,
-                        lg["name"],
-                        round(response_time_seconds, 2),
-                        datetime.fromtimestamp(alert_sent_time, tz=timezone.utc).isoformat(),
-                        responded_at.isoformat()
-                    ])
-            except Exception as e:
-                print(f"[response] Error logging response time: {e}")
+                if isinstance(raw_ts, (int, float)):
+                    alert_sent_time = float(raw_ts)
+                elif isinstance(raw_ts, str):
+                    parsed = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                    alert_sent_time = parsed.timestamp()
+            except Exception:
+                alert_sent_time = None
+        if alert_sent_time is not None:
+            response_time_seconds = time.time() - alert_sent_time
+        elif response_time_seconds is None:
+            response_time_seconds = 0.0
+
+        # Always persist the response so the dashboard recent-response list is updated,
+        # even when the alert is a crowd event without an exact legacy ID match.
+        try:
+            with open(RESPONSE_TIMES_CSV_PATH, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.now(timezone.utc).isoformat(),
+                    zone,
+                    lg_id,
+                    lg["name"],
+                    alert_id or "",
+                    round(response_time_seconds, 2) if response_time_seconds is not None else 0,
+                    datetime.fromtimestamp(alert_sent_time, tz=timezone.utc).isoformat() if alert_sent_time is not None else "",
+                    responded_at.isoformat(),
+                    response_status,
+                    alert_category,
+                ])
+        except Exception as e:
+            print(f"[response] Error logging response time: {e}")
         
         response_record = {
             "lifeguard_id": lg_id,
             "lifeguard_name": lg["name"],
             "alert_id": alert_id,
             "zone": zone,
+            "status": response_status,
+            "response_status": response_status,
+            "category": alert_category,
             "responded_at": responded_at.isoformat(),
             "response_time_seconds": response_time_seconds
         }
+
+        # Keep the alert state visible to dashboard polling and lifeguard queues.
+        if alert_id:
+            for alert in ALERT_HISTORY:
+                if str(alert.get("alert_id")) == str(alert_id):
+                    alert.update({
+                        "response_status": response_status,
+                        "responded_by": lg_id,
+                        "responded_by_name": lg["name"],
+                        "responded_at": responded_at.isoformat(),
+                        "response_time_seconds": response_time_seconds,
+                        "category": alert.get("category") or alert_category,
+                    })
+                    break
+
+        # Push the response immediately to the web dashboard and connected clients.
+        # Flask-SocketIO broadcasts by default when called outside an event handler.
+        socketio.emit("lifeguard_response", response_record)
         
         # Log response
         print(f"[lifeguard] {lg['name']} responding to zone {zone}" + 
@@ -2542,6 +2693,7 @@ def lifeguard_respond(lg_id: str):
         return jsonify({
             "message": f"{lg['name']} is responding to zone {zone}",
             "response": response_record,
+            "status": response_status,
             "response_time_seconds": response_time_seconds
         })
 
