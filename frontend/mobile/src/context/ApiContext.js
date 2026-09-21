@@ -11,6 +11,15 @@ import { logInfo } from "../utils/logger";
 
 const ApiContext = createContext(null);
 
+function isExpoMetroUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.startsWith("/_expo") || parsed.port === "8081";
+  } catch {
+    return false;
+  }
+}
+
 export function ApiProvider({ children }) {
   const [baseUrl, setBaseUrl] = useState("");
   const [ready, setReady] = useState(false);
@@ -72,8 +81,13 @@ export function ApiProvider({ children }) {
 
         if (storedUrl) {
           const url = normalizeBaseUrl(storedUrl);
-          setBaseUrl(url);
-          logInfo("Loaded saved server URL", url);
+          if (isExpoMetroUrl(url)) {
+            await AsyncStorage.removeItem(STORAGE_API_URL_KEY);
+            logInfo("Cleared Expo Metro URL; backend URL is required", url);
+          } else {
+            setBaseUrl(url);
+            logInfo("Loaded saved server URL", url);
+          }
         }
 
         if (storedToken) {
@@ -131,6 +145,9 @@ export function ApiProvider({ children }) {
     const normalized = normalizeBaseUrl(url);
     if (!isValidApiUrl(normalized)) {
       throw new Error("Enter a valid URL starting with http:// or https://");
+    }
+    if (isExpoMetroUrl(normalized)) {
+      throw new Error("Use the backend public URL, not the Expo URL on port 8081.");
     }
     await AsyncStorage.setItem(STORAGE_API_URL_KEY, normalized);
     setBaseUrl(normalized);

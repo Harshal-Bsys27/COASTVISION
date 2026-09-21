@@ -6,9 +6,10 @@ import { formatTimestamp } from "../utils/format";
 import { getEventSeverityColor } from "../utils/activityEvents";
 import { colors, spacing } from "../theme";
 
-function ActivityEventCard({ event, onRespond, responding = false, responded = false }) {
+function ActivityEventCard({ event, onRespond, responding = false, responded = false, responseStatus = "" }) {
   const accent = getEventSeverityColor(event, colors);
-  const showRespond = event.respondable && onRespond && !responded;
+  const normalizedStatus = String(responseStatus || "").toLowerCase();
+  const showRespond = event.respondable && onRespond && normalizedStatus !== "resolved";
 
   return (
     <Card style={[styles.card, { borderLeftColor: accent }]}>
@@ -20,25 +21,56 @@ function ActivityEventCard({ event, onRespond, responding = false, responded = f
           <Text variant="titleSmall" style={[styles.title, { color: accent }]}>
             {event.title}
           </Text>
+          {event.category === "high_crowd_alert" ? (
+            <Text style={[styles.category, { color: accent }]}>High Crowd Alert</Text>
+          ) : null}
           <Text style={styles.meta}>Zone {event.zone}</Text>
           {event.subtitle ? <Text style={styles.meta}>{event.subtitle}</Text> : null}
           <Text style={styles.time}>{formatTimestamp(event.timestamp)}</Text>
           {showRespond ? (
-            <Button
-              mode="contained-tonal"
-              compact
-              icon="shield-check"
-              onPress={() => onRespond(event)}
-              loading={responding}
-              disabled={responding}
-              style={styles.respondBtn}
-              buttonColor={`${accent}33`}
-              textColor={accent}
-            >
-              Respond
-            </Button>
-          ) : responded ? (
-            <Text style={[styles.responded, { color: colors.success }]}>Response recorded</Text>
+              <View style={styles.responseActions}>
+                {!normalizedStatus && <Button
+                  mode="contained-tonal"
+                  compact
+                  icon="shield-check"
+                  onPress={() => onRespond(event, "acknowledged")}
+                  loading={responding}
+                  disabled={responding}
+                  style={styles.respondBtn}
+                  buttonColor={`${accent}33`}
+                  textColor={accent}
+                >
+                  Acknowledge
+                </Button>}
+                {(normalizedStatus === "" || normalizedStatus === "acknowledged") && <Button
+                  mode="contained-tonal"
+                  compact
+                  icon="run-fast"
+                  onPress={() => onRespond(event, "en_route")}
+                  loading={responding}
+                  disabled={responding}
+                  style={styles.respondBtn}
+                  buttonColor="rgba(45, 212, 191, 0.2)"
+                  textColor={colors.success}
+                >
+                  En route
+                </Button>}
+                {(normalizedStatus === "acknowledged" || normalizedStatus === "en_route") && <Button
+                  mode="contained-tonal"
+                  compact
+                  icon="check-circle"
+                  onPress={() => onRespond(event, "resolved")}
+                  loading={responding}
+                  disabled={responding}
+                  style={styles.respondBtn}
+                  buttonColor="rgba(52, 211, 153, 0.2)"
+                  textColor={colors.success}
+                >
+                  Resolved
+                </Button>}
+              </View>
+            ) : responded ? (
+              <Text style={[styles.responded, { color: colors.success }]}>Response recorded</Text>
           ) : null}
         </View>
       </View>
@@ -91,6 +123,13 @@ const styles = StyleSheet.create({
     marginBottom: 3,
     fontWeight: "600",
   },
+  category: {
+    fontSize: 12,
+    fontWeight: "900",
+    marginBottom: 3,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
   time: {
     color: colors.textMuted,
     fontSize: 12,
@@ -102,6 +141,12 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
     borderRadius: 10,
   },
+    responseActions: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: spacing.sm,
+      marginTop: spacing.sm,
+    },
   responded: {
     fontSize: 13,
     fontWeight: "800",
