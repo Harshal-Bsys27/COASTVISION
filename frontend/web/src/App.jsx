@@ -2035,11 +2035,12 @@ function VideoManager({ api, onReload }) {
 function ResponseTimeAnalytics({ api }) {
   const [rtData, setRtData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [responseView, setResponseView] = useState("crowd");
 
   useEffect(() => {
     const fetchResponseTimes = async () => {
       try {
-        const res = await fetch(`${api}/api/analytics/response-times?limit=50`);
+        const res = await fetch(`${api}/api/analytics/response-times?limit=200`);
         const data = await res.json();
         setRtData(data);
       } catch (e) {
@@ -2064,6 +2065,22 @@ function ResponseTimeAnalytics({ api }) {
   }
 
   const { overall, by_zone, by_lifeguard, recent } = rtData;
+  const recentCrowdResponses = (recent || []).filter((r) => {
+    const category = String(r.category || "").toLowerCase();
+    const alertId = String(r.alert_id || "");
+    const label = String(r.label || r.alert_label || "").toLowerCase();
+    return category.includes("crowd") || alertId.startsWith("crowd_") || label.includes("crowd");
+  });
+  const recentOtherResponses = (recent || []).filter((r) => !recentCrowdResponses.includes(r));
+  const visibleResponses = responseView === "crowd" ? recentCrowdResponses : recentOtherResponses;
+  const statusCounts = rtData.by_status || {};
+  const statusLabel = (status) => String(status || "acknowledged").replace(/_/g, " ");
+  const statusColor = (status) => {
+    const normalized = String(status || "").toLowerCase();
+    if (normalized === "resolved") return "#34d399";
+    if (normalized === "en_route") return "#22d3ee";
+    return "#f59e0b";
+  };
 
   return (
     <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "1fr 1fr 1fr" }, gap: 3 }}>
@@ -2091,6 +2108,14 @@ function ResponseTimeAnalytics({ api }) {
           <Box sx={{ display: "flex", justifyContent: "space-between", p: 2.5, borderRadius: 2, bgcolor: "rgba(52,211,153,0.08)", border: "1px solid rgba(52,211,153,0.15)" }}>
             <Typography sx={{ color: "rgba(255,255,255,0.6)", fontWeight: 600, fontSize: 14 }}>Total Responses</Typography>
             <Typography sx={{ fontSize: 24, fontWeight: 900, color: "#34d399" }}>{overall.total_responses}</Typography>
+          </Box>
+          <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 1 }}>
+            {["acknowledged", "en_route", "resolved"].map((status) => (
+              <Box key={status} sx={{ p: 1.5, borderRadius: 2, bgcolor: `${statusColor(status)}14`, border: `1px solid ${statusColor(status)}30`, textAlign: "center" }}>
+                <Typography sx={{ color: statusColor(status), fontWeight: 800, fontSize: 18 }}>{statusCounts[status] || 0}</Typography>
+                <Typography sx={{ color: "rgba(255,255,255,0.55)", fontSize: 10, textTransform: "capitalize" }}>{statusLabel(status)}</Typography>
+              </Box>
+            ))}
           </Box>
         </Stack>
       </Box>
@@ -2144,7 +2169,29 @@ function ResponseTimeAnalytics({ api }) {
       </Box>
 
       {/* ── Recent Responses (Full Width) ── */}
-      {recent.length > 0 && (
+      <Box sx={{ gridColumn: "1 / -1", p: 3, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+        <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff", mb: 2 }}>Recent Responses</Typography>
+        <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
+          <Button
+            variant={responseView === "crowd" ? "contained" : "outlined"}
+            onClick={() => setResponseView("crowd")}
+            startIcon={<WarningAmberIcon />}
+            sx={{ textTransform: "none", fontWeight: 800, borderRadius: 2, color: responseView === "crowd" ? "#071520" : "#f59e0b", bgcolor: responseView === "crowd" ? "#f59e0b" : "transparent", borderColor: "rgba(245,158,11,0.5)", "&:hover": { bgcolor: responseView === "crowd" ? "#fbbf24" : "rgba(245,158,11,0.12)", borderColor: "#f59e0b" } }}
+          >
+            Crowd Alert Responses ({recentCrowdResponses.length})
+          </Button>
+          <Button
+            variant={responseView === "incident" ? "contained" : "outlined"}
+            onClick={() => setResponseView("incident")}
+            startIcon={<SecurityIcon />}
+            sx={{ textTransform: "none", fontWeight: 800, borderRadius: 2, color: responseView === "incident" ? "#071520" : "#2dd4bf", bgcolor: responseView === "incident" ? "#2dd4bf" : "transparent", borderColor: "rgba(45,212,191,0.5)", "&:hover": { bgcolor: responseView === "incident" ? "#5eead4" : "rgba(45,212,191,0.12)", borderColor: "#2dd4bf" } }}
+          >
+            Incident Responses ({recentOtherResponses.length})
+          </Button>
+        </Box>
+      </Box>
+
+      {responseView === "incident" && recentOtherResponses.length > 0 && (
         <Box sx={{ gridColumn: "1 / -1", p: 4, borderRadius: 4, bgcolor: "#0f1923", border: "1px solid rgba(255,255,255,0.06)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
           <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff", mb: 3 }}>Recent Responses</Typography>
           
@@ -2154,26 +2201,81 @@ function ResponseTimeAnalytics({ api }) {
                 <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
                   <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Lifeguard</th>
                   <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Zone</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Category</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Status</th>
                   <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Response Time</th>
                   <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Time</th>
                 </tr>
               </thead>
               <tbody>
-                {recent.map((r, i) => (
+                {recentOtherResponses.map((r, i) => {
+                  const category = String(r.category || "unknown").replace(/_/g, " ");
+                  return (
+                    <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                      <td style={{ padding: "12px 16px", color: "#fff", fontWeight: 600 }}>{r.lifeguard_name}</td>
+                      <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.8)" }}>Zone {r.zone}</td>
+                      <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.8)", textTransform: "capitalize" }}>{category === "unknown" ? "Incident" : category}</td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <Chip label={statusLabel(r.response_status)} size="small" sx={{ bgcolor: `${statusColor(r.response_status)}20`, color: statusColor(r.response_status), fontWeight: 700, height: 24, textTransform: "capitalize" }} />
+                      </td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <Chip label={`${r.response_time_seconds}s`} size="small" sx={{ bgcolor: r.response_time_seconds < 30 ? "rgba(52,211,153,0.2)" : r.response_time_seconds < 60 ? "rgba(245,158,11,0.2)" : "rgba(244,114,182,0.2)", color: r.response_time_seconds < 30 ? "#34d399" : r.response_time_seconds < 60 ? "#f59e0b" : "#f472b6", fontWeight: 700, height: 24 }} />
+                      </td>
+                      <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.5)" }}>
+                        {r.responded_at ? new Date(r.responded_at).toLocaleTimeString() : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </Box>
+        </Box>
+      )}
+
+      {responseView === "crowd" && recentCrowdResponses.length > 0 && (
+        <Box sx={{ gridColumn: "1 / -1", p: 4, borderRadius: 4, bgcolor: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.2)", boxShadow: "0 4px 20px rgba(0,0,0,0.25)" }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 22, color: "#fff", mb: 3 }}>Crowd Alert Responses</Typography>
+          <Box sx={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Lifeguard</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Zone</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Category</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Status</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Response Time</th>
+                  <th style={{ padding: "12px 16px", textAlign: "left", color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentCrowdResponses.map((r, i) => (
                   <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
                     <td style={{ padding: "12px 16px", color: "#fff", fontWeight: 600 }}>{r.lifeguard_name}</td>
                     <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.8)" }}>Zone {r.zone}</td>
+                    <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.8)", textTransform: "capitalize" }}>High Crowd Alert</td>
+                    <td style={{ padding: "12px 16px" }}>
+                      <Chip label={statusLabel(r.response_status)} size="small" sx={{ bgcolor: `${statusColor(r.response_status)}20`, color: statusColor(r.response_status), fontWeight: 700, height: 24, textTransform: "capitalize" }} />
+                    </td>
                     <td style={{ padding: "12px 16px" }}>
                       <Chip label={`${r.response_time_seconds}s`} size="small" sx={{ bgcolor: r.response_time_seconds < 30 ? "rgba(52,211,153,0.2)" : r.response_time_seconds < 60 ? "rgba(245,158,11,0.2)" : "rgba(244,114,182,0.2)", color: r.response_time_seconds < 30 ? "#34d399" : r.response_time_seconds < 60 ? "#f59e0b" : "#f472b6", fontWeight: 700, height: 24 }} />
                     </td>
                     <td style={{ padding: "12px 16px", color: "rgba(255,255,255,0.5)" }}>
-                      {new Date(r.responded_at).toLocaleTimeString()}
+                      {r.responded_at ? new Date(r.responded_at).toLocaleTimeString() : "—"}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </Box>
+        </Box>
+      )}
+
+      {visibleResponses.length === 0 && (
+        <Box sx={{ gridColumn: "1 / -1", p: 5, borderRadius: 4, bgcolor: "#0f1923", border: "1px dashed rgba(255,255,255,0.12)", textAlign: "center" }}>
+          <Typography sx={{ color: "rgba(255,255,255,0.55)", fontSize: 15 }}>
+            No {responseView === "crowd" ? "crowd alert" : "incident"} responses recorded yet.
+          </Typography>
         </Box>
       )}
     </Box>
@@ -2763,6 +2865,7 @@ export default function App() {
 
   // WebSocket real-time updates for instant alert broadcasting
   const [wsAlerts, setWsAlerts] = useState([]);
+  const [wsResponses, setWsResponses] = useState({});
   const [wsConnected, setWsConnected] = useState(false);
   
   const { isConnected } = useRealtimeUpdates(
@@ -2778,6 +2881,12 @@ export default function App() {
     (response) => {
       // Lifeguard response received via WebSocket
       console.log('[Dashboard] Lifeguard response:', response);
+      if (response?.alert_id) {
+        setWsResponses((current) => ({
+          ...current,
+          [response.alert_id]: response,
+        }));
+      }
     },
     null,
     API // Pass backend URL
@@ -2793,6 +2902,11 @@ export default function App() {
   const modalAlerts = usePollJson(openZone ? `${API}/api/alerts?zone=${openZone}&limit=40` : `${API}/api/alerts?limit=1`, 900, !!openZone, { items: [] });
   const modalAnalysis = usePollJson(openZone ? `${API}/api/analysis?zone=${openZone}` : `${API}/api/analysis`, 1200, !!openZone, { alerts_total: 0, alerts_by_zone: {}, alerts_by_label: {} });
   const modalDetections = usePollJson(openZone ? `${API}/api/zones/${openZone}/detections` : `${API}/api/zones/1/detections`, 250, !!openZone, { zone: null, count: 0, age_s: null, items: [] });
+
+  const responseForAlert = (alert) => {
+    const response = wsResponses[alert.alert_id];
+    return response ? { ...alert, ...response, response_status: response.status || response.response_status } : alert;
+  };
 
   const emergencyCount = useMemo(() => {
     return (alerts.items || []).filter((a) => {
@@ -3698,6 +3812,7 @@ export default function App() {
                 <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "repeat(2, 1fr)", xl: "repeat(3, 1fr)" }, gap: 2, maxHeight: 600, overflowY: "auto", pr: 1, "&::-webkit-scrollbar": { width: 4 }, "&::-webkit-scrollbar-thumb": { bgcolor: "rgba(255,255,255,0.1)", borderRadius: 2 } }}>
                   {(alerts.items || []).length > 0 ? (
                     (alerts.items || []).slice(0, 30).map((alert, idx) => {
+                      const displayedAlert = responseForAlert(alert);
                       const isEmergency = String(alert.label || "").toLowerCase().includes("drown") || String(alert.label || "").toLowerCase().includes("emerg");
                       const color = isEmergency ? "#ff5252" : "#2dd4bf";
                       return (
@@ -3707,6 +3822,7 @@ export default function App() {
                             <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
                               <Typography sx={{ fontSize: 12, fontWeight: 700, color: "#fff", textTransform: "capitalize" }}>{alert.label || "Detection"}</Typography>
                               <Chip label={zoneNames.get(alert.zone) || `Z${alert.zone}`} size="small" sx={{ height: 16, fontSize: 9, fontWeight: 700, bgcolor: "rgba(45,212,191,0.1)", color: "#2dd4bf" }} />
+                              {displayedAlert.response_status && <Chip label={String(displayedAlert.response_status).replace("_", " ")} size="small" sx={{ height: 16, fontSize: 9, fontWeight: 700, bgcolor: "rgba(52,211,153,0.14)", color: "#34d399", textTransform: "capitalize" }} />}
                               {isEmergency && <Box sx={{ width: 5, height: 5, borderRadius: "50%", bgcolor: "#ff5252", animation: "pulse 0.8s infinite" }} />}
                             </Box>
                             <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -3749,13 +3865,17 @@ export default function App() {
               {/* Rows */}
               <Stack spacing={0}>
                 {(alerts.items || []).map((a, idx) => {
+                  const displayedAlert = responseForAlert(a);
                   const isEmergency = String(a.label || "").toLowerCase().includes("drown") || String(a.label || "").toLowerCase().includes("emerg");
                   return (
                     <Box key={idx} sx={{ display: "grid", gridTemplateColumns: "180px 100px 140px 1fr 80px", gap: 2, p: 2, borderBottom: "1px solid rgba(255,255,255,0.05)", bgcolor: isEmergency ? "rgba(244,67,54,0.08)" : "transparent", "&:hover": { bgcolor: "rgba(255,255,255,0.03)" } }}>
                       <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>{a.ts}</Typography>
                       <Chip label={`Zone ${a.zone}`} size="small" sx={{ width: "fit-content", bgcolor: "rgba(0,188,212,0.15)", color: "#00bcd4", fontWeight: 700, fontSize: 11, height: 22 }} />
                       <Typography sx={{ fontSize: 13, fontWeight: 700, color: isEmergency ? "#f44336" : "#ff9800", textTransform: "capitalize" }}>{a.label}</Typography>
-                      <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.8)" }}>{a.msg}</Typography>
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 0 }}>
+                        <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.8)" }}>{a.msg}</Typography>
+                        {displayedAlert.response_status && <Chip label={String(displayedAlert.response_status).replace("_", " ")} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 700, bgcolor: "rgba(52,211,153,0.14)", color: "#34d399", textTransform: "capitalize" }} />}
+                      </Box>
                       <Typography sx={{ fontSize: 13, textAlign: "right", fontWeight: 700 }}>{((a.conf ?? 0) * 100).toFixed(0)}%</Typography>
                     </Box>
                   );
