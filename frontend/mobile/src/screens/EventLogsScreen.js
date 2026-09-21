@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, FlatList, Pressable, StyleSheet, View } from "react-native";
+import { FlatList, Pressable, StyleSheet, View } from "react-native";
 import { ActivityIndicator, Snackbar, Text } from "react-native-paper";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import ActivityEventCard from "../components/ActivityEventCard";
@@ -41,6 +41,7 @@ export default function EventLogsScreen() {
   const [statusChangeEvents, setStatusChangeEvents] = useState([]);
   const [respondingId, setRespondingId] = useState(null);
   const [respondedIds, setRespondedIds] = useState(() => new Set());
+  const [localResponseStatuses, setLocalResponseStatuses] = useState(() => new Map());
   const [snackbar, setSnackbar] = useState({ visible: false, message: "" });
   const previousCrowdRef = useRef({});
 
@@ -80,8 +81,9 @@ export default function EventLogsScreen() {
       try {
         const result = await api.lifeguardRespond(lifeguard.id, event.alertId, event.zone, status);
         setRespondedIds((prev) => new Set(prev).add(event.id));
+        setLocalResponseStatuses((prev) => new Map(prev).set(String(event.id), status));
         const seconds = result?.response_time_seconds;
-        const label = status === "en_route" ? "En route" : "Acknowledged";
+        const label = status === "en_route" ? "En route" : status === "resolved" ? "Resolved" : "Acknowledged";
         const message = seconds != null
           ? `${label} (${Number(seconds).toFixed(1)}s)`
           : `${label} response recorded`;
@@ -101,28 +103,9 @@ export default function EventLogsScreen() {
   );
 
   const handleRespond = useCallback(
-    (event) => {
+    (event, status) => {
       if (!lifeguard?.id || respondingId) return;
-
-      Alert.alert(
-        "Confirm response",
-        `Choose how you are responding to zone ${event.zone}`,
-        [
-          {
-            text: "Acknowledge",
-            onPress: () => submitResponse(event, "acknowledged"),
-          },
-          {
-            text: "En route",
-            onPress: () => submitResponse(event, "en_route"),
-          },
-          {
-            text: "Cancel",
-            style: "cancel",
-          },
-        ],
-        { cancelable: true }
-      );
+      submitResponse(event, status);
     },
     [lifeguard?.id, respondingId, submitResponse]
   );
@@ -178,8 +161,8 @@ export default function EventLogsScreen() {
     );
     const merged = mergeActivityEvents(
       crowdAlertsToEvents(crowdAlerts),
-      responsesToEvents(responsesPoll.data?.recent || []),
       drowningAlertsToEvents(alerts),
+      responsesToEvents(responsesPoll.data?.recent || []),
       statusChangeEvents
     );
     return filterByZoneField(merged, assignedZones, (event) => event.zone);
@@ -192,17 +175,57 @@ export default function EventLogsScreen() {
     const ids = new Set();
     activityEvents.forEach((event) => {
       if (!event.respondable) return;
-      const eventZone = String(event.zone);
-      const eventTime = event.timestamp || 0;
+
+      const eventAlertId = event.alertId ? String(event.alertId) : "";
       const matched = rows.some((row) => {
-        if (String(row.zone) !== eventZone) return false;
-        const rowTime = new Date(row.responded_at || row.timestamp || 0).getTime();
-        if (!rowTime || !eventTime) return true;
-        return Math.abs(rowTime - eventTime) < 15 * 60 * 1000;
+        const rowAlertId = row.alert_id ? String(row.alert_id) : "";
+        if (eventAlertId && rowAlertId && eventAlertId === rowAlertId) return true;
+        if (eventAlertId && String(event.id) && String(event.id) === rowAlertId) return true;
+        if (!eventAlertId && String(event.id) === String(row.alert_id || row.event_id || "")) return true;
+        return false;
       });
+
       if (matched) ids.add(event.id);
     });
     return ids;
+  }, [activityEvents, responsesPoll.data]);
+
+  const responseStatusByEvent = useMemo(() => {
+    const rows = responsesPoll.data?.recent || [];
+    const statuses = new Map();
+    activityEvents.forEach((event) => {
+      const eventKeys = [event.alertId, event.id].filter(Boolean).map(String);
+      let matchedStatus = "";
+      let matchedAt = 0;
+
+      rows.forEach((row) => {
+        const rowKeys = [row.alert_id, row.event_id].filter(Boolean).map(String);
+        const sameAlert = rowKeys.some((key) => eventKeys.includes(key));
+        const responseTime = row.responded_at ? new Date(row.responded_at).getTime() : 0;
+        const eventTime = new Date(event.timestamp).getTime();
+        const sameZoneFallback =
+          !rowKeys.length &&
+          row.zone != null &&
+          String(row.zone) === String(event.zone) &&
+          responseTime &&
+          eventTime &&
+          Math.abs(eventTime - responseTime) < 120000;
+
+        if (sameAlert || sameZoneFallback) {
+          const rowTime = row.responded_at ? new Date(row.responded_at).getTime() : 0;
+          if (rowTime >= matchedAt) {
+            matchedStatus = String(row.response_status || row.status || "acknowledged");
+            matchedAt = rowTime;
+          }
+        }
+      });
+
+      if (matchedStatus) {
+        statuses.set(String(event.id), matchedStatus);
+        if (event.alertId) statuses.set(String(event.alertId), matchedStatus);
+      }
+    });
+    return statuses;
   }, [activityEvents, responsesPoll.data]);
 
   const filteredEvents = useMemo(
@@ -285,14 +308,22 @@ export default function EventLogsScreen() {
               )}
             </View>
           }
-          renderItem={({ item }) => (
-            <ActivityEventCard
-              event={item}
-              onRespond={item.respondable ? handleRespond : undefined}
-              responding={respondingId === item.id}
-              responded={respondedIds.has(item.id) || respondedIdsFromApi.has(item.id)}
-            />
-          )}
+          renderItem={({ item }) => {
+            const eventStatus =
+              responseStatusByEvent.get(String(item.alertId || "")) ||
+              responseStatusByEvent.get(String(item.id || "")) ||
+              "";
+
+            return (
+              <ActivityEventCard
+                event={item}
+                onRespond={item.respondable ? handleRespond : undefined}
+                responding={respondingId === item.id}
+                responded={respondedIds.has(item.id) || respondedIdsFromApi.has(item.id)}
+                responseStatus={localResponseStatuses.get(String(item.id)) || eventStatus || ""}
+              />
+            );
+          }}
         />
       )}
       <Snackbar

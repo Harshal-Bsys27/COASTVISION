@@ -50,9 +50,10 @@ function makeEvent({
 export function crowdAlertsToEvents(crowdAlerts = []) {
   return crowdAlerts.map((alert, index) => {
     const severity = String(alert.severity || "medium").toLowerCase();
-    const isHigh = severity === "high";
+    const isHigh = severity === "high" || String(alert.category || "").includes("crowd") || String(alert.label || "").includes("Crowd");
+    const alertId = alert.alert_id || alert.id || (alert.zone != null && alert.timestamp ? `crowd_${alert.zone}_${Math.round(parseTimestamp(alert.timestamp))}` : null);
     return makeEvent({
-      id: `crowd-${alert.zone}-${alert.timestamp || index}`,
+      id: `crowd-${alert.zone}-${alertId || alert.timestamp || index}`,
       category: isHigh ? EVENT_CATEGORIES.HIGH_CROWD_ALERT : EVENT_CATEGORIES.CROWD_INCREASE,
       title: isHigh ? "High Crowd Alert" : "Crowd Threshold Exceeded",
       zone: alert.zone,
@@ -61,7 +62,8 @@ export function crowdAlertsToEvents(crowdAlerts = []) {
       subtitle: `${alert.person_count ?? "?"} / ${alert.threshold ?? "?"} people`,
       icon: isHigh ? "alert-circle" : "account-group",
       source: "crowd",
-      respondable: isHigh,
+      respondable: true,
+      alertId,
     });
   });
 }
@@ -70,19 +72,24 @@ export function responsesToEvents(responses = []) {
   return responses.map((row, index) => {
     const status = String(row.response_status || row.status || "acknowledged").replace(/_/g, " ");
     const responseTime = row.response_time_seconds ?? "?";
+    const alertKey = row.alert_id || row.event_id || `${row.zone || "zone"}-${row.responded_at || row.timestamp || index}`;
+    const rawCategory = String(row.category || "").toLowerCase();
+    const isCrowdResponse = rawCategory.includes("crowd") || String(row.alert_id || "").startsWith("crowd_");
+    const category = isCrowdResponse ? EVENT_CATEGORIES.HIGH_CROWD_ALERT : EVENT_CATEGORIES.LIFEGUARD_RESPONSE;
     return makeEvent({
-      id: `response-${row.zone}-${row.timestamp || row.responded_at || index}`,
-      category: EVENT_CATEGORIES.LIFEGUARD_RESPONSE,
-      title: "Lifeguard Response",
+      id: `response-${String(alertKey)}-${row.zone || "zone"}-${row.responded_at || row.timestamp || index}`,
+      category,
+      title: isCrowdResponse ? "High Crowd Alert" : "Lifeguard Response",
       zone: row.zone,
       timestamp: parseTimestamp(row.timestamp || row.responded_at),
-      severity: "success",
+      severity: isCrowdResponse ? "high" : "success",
       subtitle: row.lifeguard_name
         ? `${row.lifeguard_name} · ${status} · ${responseTime}s`
         : `${status} · ${responseTime}s response time`,
-      icon: "shield-check",
+      icon: isCrowdResponse ? "account-group" : "shield-check",
       source: "response",
       status,
+      alertId: row.alert_id || row.event_id || null,
     });
   });
 }
@@ -102,7 +109,8 @@ export function drowningAlertsToEvents(alerts = []) {
         icon: "lifebuoy",
         source: "alert",
         respondable: true,
-        alertId: alert.event_id || null,
+        // The backend response timer uses alert_id; event_id is only the CSV record id.
+        alertId: alert.alert_id || alert.event_id || null,
       })
     );
 }
@@ -206,8 +214,10 @@ export function mergeActivityEvents(...lists) {
 
   for (const list of lists) {
     for (const event of list) {
-      if (!event?.id || seen.has(event.id)) continue;
-      seen.add(event.id);
+      const dedupeKey = event?.alertId || event?.id;
+      if (!dedupeKey) continue;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
       merged.push(event);
     }
   }
