@@ -58,6 +58,7 @@ import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
 import VolumeOffIcon from "@mui/icons-material/VolumeOff";
+import RecordVoiceOverIcon from "@mui/icons-material/RecordVoiceOver";
 import DownloadIcon from "@mui/icons-material/Download";
 import SpeedIcon from "@mui/icons-material/Speed";
 import CenterFocusStrongIcon from "@mui/icons-material/CenterFocusStrong";
@@ -457,6 +458,8 @@ const getMaleVoice = () => {
   return null;
 };
 
+let responseAnnouncementActiveUntil = 0;
+
 const useEmergencyVoiceAlert = (alerts, soundEnabled, openZone, paused) => {
   const seenAlertsRef = useRef(new Set()); // Track alerts we've already announced
   const lastPlayRef = useRef(0);
@@ -470,7 +473,8 @@ const useEmergencyVoiceAlert = (alerts, soundEnabled, openZone, paused) => {
     // Find emergency alerts
     const emergencyAlerts = (alerts || []).filter((a) => {
       const l = String(a.label || "").toLowerCase();
-      return l.includes("drown") || l.includes("emerg");
+      const category = String(a.category || "").toLowerCase();
+      return l.includes("drown") || l.includes("emerg") || l.includes("crowd") || category.includes("crowd");
     });
     
     if (emergencyAlerts.length === 0) return;
@@ -489,6 +493,8 @@ const useEmergencyVoiceAlert = (alerts, soundEnabled, openZone, paused) => {
     // Minimum 30 seconds between any voice alerts
     if (now - lastPlayRef.current < 30000) return;
     
+    if (Date.now() < responseAnnouncementActiveUntil) return;
+
     // Check if this is a truly NEW alert we haven't announced
     const latestAlert = emergencyAlerts[0];
     // Create a unique ID from timestamp + zone + label
@@ -529,10 +535,16 @@ const useEmergencyVoiceAlert = (alerts, soundEnabled, openZone, paused) => {
     if ('speechSynthesis' in window && !speakingRef.current) {
       speakingRef.current = true;
       window.speechSynthesis.cancel();
+      window.speechSynthesis.resume();
       
       const zone = latestAlert.zone || openZone;
       const label = String(latestAlert.label || "drowning").toLowerCase();
-      let message = label.includes("drown") 
+      const category = String(latestAlert.category || "").toLowerCase();
+      let message = category.includes("crowd") || label.includes("crowd")
+        ? (zone ? `High crowd alert in Zone ${zone}. Please respond.` : "High crowd alert detected. Please respond.")
+        : category.includes("sos") || label.includes("sos")
+          ? (zone ? `Emergency SOS in Zone ${zone}. Please respond immediately.` : "Emergency SOS activated. Please respond immediately.")
+          : label.includes("drown")
         ? (zone ? `Alert! Drowning detected in Zone ${zone}. Please check immediately.` : "Alert! Drowning detected. Please check immediately.")
         : (zone ? `Emergency alert in Zone ${zone}. Please respond.` : "Emergency alert detected. Please respond.");
       
@@ -549,9 +561,42 @@ const useEmergencyVoiceAlert = (alerts, soundEnabled, openZone, paused) => {
       utterance.onend = () => { speakingRef.current = false; };
       utterance.onerror = () => { speakingRef.current = false; };
       
-      setTimeout(() => window.speechSynthesis.speak(utterance), 500);
+      window.speechSynthesis.speak(utterance);
     }
   }, [alerts, soundEnabled, openZone, paused]);
+};
+
+const announceLifeguardResponse = (response, lifeguardLabel) => {
+  if (typeof window === "undefined" || !("speechSynthesis" in window) || !response) return;
+
+  const name = lifeguardLabel || "Lifeguard";
+  const zone = response.zone != null ? `Zone ${response.zone}` : "the incident zone";
+  const status = String(response.status || response.response_status || "acknowledged").toLowerCase();
+  const category = String(response.category || "").toLowerCase();
+  const prefix = category.includes("crowd")
+    ? "High crowd alert."
+    : category.includes("sos")
+      ? "Emergency SOS."
+      : "Incident alert.";
+  const action = status === "en_route"
+    ? "is en route"
+    : status === "resolved"
+      ? "resolved the incident"
+      : "acknowledged the alert";
+
+  const utterance = new SpeechSynthesisUtterance(`${prefix} ${name} ${action} in ${zone}.`);
+  utterance.rate = 0.85;
+  utterance.volume = 1;
+  utterance.pitch = 1.08;
+  utterance.lang = "en-US";
+  const preferredVoice = getMaleVoice();
+  if (preferredVoice) utterance.voice = preferredVoice;
+  responseAnnouncementActiveUntil = Date.now() + 12000;
+  window.speechSynthesis.resume();
+  window.speechSynthesis.cancel();
+  utterance.onend = () => { responseAnnouncementActiveUntil = 0; };
+  utterance.onerror = () => { responseAnnouncementActiveUntil = 0; };
+  window.speechSynthesis.speak(utterance);
 };
 
 // Speak function for announcements
@@ -2681,6 +2726,9 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [autoAnnounce, setAutoAnnounce] = useState(true); // Auto announce toggle - ON by default for voice alerts
+  const [responseAnnounce, setResponseAnnounce] = useState(true);
+  const lifeguardNumberRef = useRef(new Map());
+  const responseAnnouncedRef = useRef(new Set());
 
   const [modalPaused, setModalPaused] = useState(false);
   const [modalMode, setModalMode] = useState("hls"); // "hls" | "mjpeg" | "poll"
@@ -2867,6 +2915,7 @@ export default function App() {
   const [wsAlerts, setWsAlerts] = useState([]);
   const [wsResponses, setWsResponses] = useState({});
   const [wsConnected, setWsConnected] = useState(false);
+  const announcedResponseIdsRef = useRef(new Set());
   
   const { isConnected } = useRealtimeUpdates(
     (alert) => {
@@ -2887,6 +2936,15 @@ export default function App() {
           [response.alert_id]: response,
         }));
       }
+      const responseKey = `${response?.alert_id || "response"}:${response?.status || response?.response_status || "acknowledged"}:${response?.responded_at || response?.timestamp || ""}`;
+      if (responseAnnounce && soundEnabled && !paused && !announcedResponseIdsRef.current.has(responseKey)) {
+        announcedResponseIdsRef.current.add(responseKey);
+        const lifeguardId = String(response?.lifeguard_id || "unknown");
+        if (!lifeguardNumberRef.current.has(lifeguardId)) {
+          lifeguardNumberRef.current.set(lifeguardId, lifeguardNumberRef.current.size + 1);
+        }
+        announceLifeguardResponse(response, `Lifeguard ${lifeguardNumberRef.current.get(lifeguardId)}`);
+      }
     },
     null,
     API // Pass backend URL
@@ -2897,11 +2955,25 @@ export default function App() {
   }, [isConnected]);
 
   const alerts = usePollJson(`${API}/api/alerts?limit=120`, 1000, true, { items: [] });
+  const responseUpdates = usePollJson(`${API}/api/analytics/response-times?limit=200`, 1500, true, { recent: [] });
   const analysis = usePollJson(`${API}/api/analysis`, 1500, true, { alerts_total: 0, alerts_by_zone: {}, alerts_by_label: {} });
 
   const modalAlerts = usePollJson(openZone ? `${API}/api/alerts?zone=${openZone}&limit=40` : `${API}/api/alerts?limit=1`, 900, !!openZone, { items: [] });
   const modalAnalysis = usePollJson(openZone ? `${API}/api/analysis?zone=${openZone}` : `${API}/api/analysis`, 1200, !!openZone, { alerts_total: 0, alerts_by_zone: {}, alerts_by_label: {} });
   const modalDetections = usePollJson(openZone ? `${API}/api/zones/${openZone}/detections` : `${API}/api/zones/1/detections`, 250, !!openZone, { zone: null, count: 0, age_s: null, items: [] });
+
+  useEffect(() => {
+    const latest = (responseUpdates.recent || []).at(-1);
+    if (!latest || !responseAnnounce || !soundEnabled || paused) return;
+    const key = `${latest.alert_id || "response"}:${latest.response_status || latest.status || "acknowledged"}:${latest.responded_at || latest.timestamp || ""}`;
+    if (responseAnnouncedRef.current.has(key)) return;
+    responseAnnouncedRef.current.add(key);
+    const lifeguardId = String(latest.lifeguard_id || "unknown");
+    if (!lifeguardNumberRef.current.has(lifeguardId)) {
+      lifeguardNumberRef.current.set(lifeguardId, lifeguardNumberRef.current.size + 1);
+    }
+    announceLifeguardResponse(latest, `Lifeguard ${lifeguardNumberRef.current.get(lifeguardId)}`);
+  }, [paused, responseAnnounce, responseUpdates, soundEnabled]);
 
   const responseForAlert = (alert) => {
     const response = wsResponses[alert.alert_id];
@@ -3171,6 +3243,28 @@ export default function App() {
               sx={{ color: soundEnabled ? "#00e676" : "rgba(255,255,255,0.35)", bgcolor: soundEnabled ? "rgba(0,230,118,0.1)" : "rgba(255,255,255,0.06)", border: `1.5px solid ${soundEnabled ? "rgba(0,230,118,0.3)" : "rgba(255,255,255,0.1)"}`, borderRadius: "12px", width: 46, height: 46, "&:hover": { color: soundEnabled ? "#00e676" : "#2dd4bf", bgcolor: soundEnabled ? "rgba(0,230,118,0.18)" : "rgba(45,212,191,0.1)", borderColor: soundEnabled ? "rgba(0,230,118,0.5)" : "rgba(45,212,191,0.3)" } }}
             >
               {soundEnabled ? <VolumeUpIcon sx={{ fontSize: 22 }} /> : <VolumeOffIcon sx={{ fontSize: 22 }} />}
+            </IconButton>
+          </Tooltip>
+
+          <Tooltip title={responseAnnounce ? "Turn off lifeguard response announcements" : "Turn on lifeguard response announcements"}>
+            <IconButton
+              onClick={() => {
+                setResponseAnnounce((enabled) => {
+                  if (enabled && "speechSynthesis" in window) window.speechSynthesis.cancel();
+                  return !enabled;
+                });
+              }}
+              sx={{
+                color: responseAnnounce && soundEnabled ? "#38bdf8" : "rgba(255,255,255,0.35)",
+                bgcolor: responseAnnounce && soundEnabled ? "rgba(56,189,248,0.12)" : "rgba(255,255,255,0.06)",
+                border: `1.5px solid ${responseAnnounce && soundEnabled ? "rgba(56,189,248,0.35)" : "rgba(255,255,255,0.1)"}`,
+                borderRadius: "12px",
+                width: 46,
+                height: 46,
+                "&:hover": { color: "#38bdf8", bgcolor: "rgba(56,189,248,0.16)" },
+              }}
+            >
+              <RecordVoiceOverIcon sx={{ fontSize: 22 }} />
             </IconButton>
           </Tooltip>
 
