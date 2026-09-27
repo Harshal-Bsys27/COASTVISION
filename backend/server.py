@@ -397,6 +397,7 @@ _ALERT_CLASSES_ENV = os.environ.get("COASTVISION_ALERT_CLASSES", "").strip()
 ALERT_CLASSES = {s.strip().lower() for s in _ALERT_CLASSES_ENV.split(",") if s.strip()} if _ALERT_CLASSES_ENV else None
 
 ALERT_HISTORY = deque(maxlen=400)
+SOS_ALERT_HISTORY = deque(maxlen=100)
 
 ALERTS_DIR = (ROOT / ".." / "data" / "alerts").resolve()
 ALERTS_IMAGES_DIR = (ALERTS_DIR / "images").resolve()
@@ -592,9 +593,9 @@ def _broadcast_alert_to_lifeguards(alert: dict):
     
     with _lifeguard_lock:
         for lg_id, lg in LIFEGUARDS.items():
-            # Send to lifeguards assigned to this zone OR all zones (empty list = all)
+            # SOS alerts reach every lifeguard; normal alerts respect zone assignments.
             assigned = lg.get("zones", [])
-            if _zone_matches_assignment(zone, assigned):
+            if alert.get("broadcast_all") or _zone_matches_assignment(zone, assigned):
                 # Add to their alert queue
                 if lg_id not in LIFEGUARD_ALERTS:
                     LIFEGUARD_ALERTS[lg_id] = deque(maxlen=100)
@@ -1916,7 +1917,12 @@ def alerts():
     limit = int(request.args.get("limit", "120"))
     zone = request.args.get("zone", "").strip()
     out = []
-    for a in list(ALERT_HISTORY):
+    # Keep manual SOS alerts visible even while live detections are arriving.
+    combined = list(SOS_ALERT_HISTORY) + [
+        alert for alert in list(ALERT_HISTORY)
+        if not str(alert.get("category", "")).lower().startswith("emergency_sos")
+    ]
+    for a in combined:
         if zone and str(a.get("zone")) != str(zone):
             continue
         out.append(a)
@@ -1929,6 +1935,7 @@ def alerts():
 def analysis():
     zone = request.args.get("zone", "").strip()
     items = list(ALERT_HISTORY)
+    items.extend(list(SOS_ALERT_HISTORY))
     if zone:
         items = [a for a in items if str(a.get("zone")) == str(zone)]
 
@@ -2554,10 +2561,18 @@ def get_lifeguard_alerts(lg_id: str):
         lg = LIFEGUARDS[lg_id]
         assigned_zones = lg.get("zones", [])
         
-        # Get alerts from history for assigned zones
+        # SOS alerts are global emergencies and must reach every lifeguard,
+        # including lifeguards whose assigned zones differ from the origin.
         alerts = []
-        for a in list(ALERT_HISTORY):
-            if _zone_matches_assignment(a.get("zone"), assigned_zones):
+        combined = list(SOS_ALERT_HISTORY) + list(ALERT_HISTORY)
+        seen_ids = set()
+        for a in combined:
+            alert_key = str(a.get("alert_id") or a.get("event_id") or "")
+            if alert_key in seen_ids:
+                continue
+            seen_ids.add(alert_key)
+            is_sos = str(a.get("category", "")).lower() == "emergency_sos"
+            if is_sos or _zone_matches_assignment(a.get("zone"), assigned_zones):
                 alerts.append(a)
                 if len(alerts) >= limit:
                     break
@@ -2708,6 +2723,46 @@ def lifeguard_heartbeat(lg_id: str):
         LIFEGUARDS[lg_id]["last_seen"] = time.time()
         _save_lifeguards()
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/lifeguards/<lg_id>/sos", methods=["POST"])
+def lifeguard_sos(lg_id: str):
+    """Create and broadcast a manual emergency SOS alert."""
+    data = request.get_json() or {}
+    zone = data.get("zone")
+    if zone is None or str(zone).strip() == "":
+        return jsonify({"error": "Zone is required for SOS"}), 400
+
+    with _lifeguard_lock:
+        lifeguard = LIFEGUARDS.get(lg_id)
+        if not lifeguard:
+            return jsonify({"error": "Lifeguard not found"}), 404
+        assigned_zones = lifeguard.get("zones", [])
+        if assigned_zones and not _zone_matches_assignment(zone, assigned_zones):
+            return jsonify({"error": "Lifeguard is not assigned to this zone"}), 403
+
+    now = datetime.now(timezone.utc)
+    alert = {
+        "event_id": f"sos_{int(now.timestamp() * 1000)}_{uuid.uuid4().hex[:8]}",
+        "alert_id": f"sos_{int(now.timestamp() * 1000)}_{uuid.uuid4().hex[:8]}",
+        "ts_utc": now.isoformat(),
+        "timestamp": now.timestamp(),
+        "zone": zone,
+        "label": "Emergency SOS",
+        "category": "emergency_sos",
+        "severity": "critical",
+        "conf": 1.0,
+        "msg": f"Manual emergency SOS activated by {lifeguard.get('name', lg_id)}",
+        "created_by": lg_id,
+        "created_by_name": lifeguard.get("name", lg_id),
+        "response_status": "pending",
+        "broadcast_all": True,
+    }
+
+    ALERT_HISTORY.appendleft(alert)
+    SOS_ALERT_HISTORY.appendleft(alert)
+    _broadcast_alert_to_lifeguards(alert)
+    return jsonify({"message": "Emergency SOS broadcast", "alert": alert}), 201
 
 
 @app.route("/api/lifeguards/<lg_id>/stream", methods=["GET"])
