@@ -128,6 +128,8 @@ export function createApi(baseUrl, getToken) {
     lifeguardAlerts: (lgId, limit = 50) => get(`/api/lifeguards/${lgId}/alerts?limit=${limit}`),
     lifeguardRespond: (lgId, alertId, zone, status = "acknowledged") =>
       post(`/api/lifeguards/${lgId}/respond`, { alert_id: alertId, zone, status }),
+    lifeguardSos: (lgId, zone) =>
+      post(`/api/lifeguards/${lgId}/sos`, { zone }),
     lifeguardHeartbeat: (lgId) => post(`/api/lifeguards/${lgId}/heartbeat`),
     hlsUrl: (zid) => `${normalizeBaseUrl(baseUrl)}/api/zones/${zid}/hls/stream.m3u8`,
     frameUrl: (zid, width) => {

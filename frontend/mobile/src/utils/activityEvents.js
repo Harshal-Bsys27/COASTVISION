@@ -232,12 +232,14 @@ export function filterActivityEvents(events, filterId) {
 
   if (filterId === "alerts") {
     return events.filter((event) =>
-      [EVENT_CATEGORIES.DROWNING_ALERT, EVENT_CATEGORIES.HIGH_CROWD_ALERT].includes(event.category)
+      event.source === "alert" &&
+      [EVENT_CATEGORIES.DROWNING_ALERT].includes(event.category)
     );
   }
 
   if (filterId === "crowd") {
     return events.filter((event) =>
+      event.source === "crowd" &&
       [
         EVENT_CATEGORIES.CROWD_INCREASE,
         EVENT_CATEGORIES.HIGH_CROWD_ALERT,
@@ -248,7 +250,7 @@ export function filterActivityEvents(events, filterId) {
   }
 
   if (filterId === "responses") {
-    return events.filter((event) => event.category === EVENT_CATEGORIES.LIFEGUARD_RESPONSE);
+    return events.filter((event) => event.source === "response");
   }
 
   return events;
