@@ -181,9 +181,15 @@ export default function DashboardScreen() {
   }, [zonesPoll, loadDetections]);
 
   const triggerEmergencySOS = useCallback(() => {
+    const zoneId = zones[0]?.id ?? assignedZones?.[0];
+    if (zoneId == null || String(zoneId).startsWith("placeholder-")) {
+      Alert.alert("SOS unavailable", "No active zone is available for this emergency alert.");
+      return;
+    }
+
     Alert.alert(
       "🚨 EMERGENCY SOS",
-      "Confirm emergency situation - all lifeguards will be alerted immediately",
+      `Confirm emergency situation in ${zones[0]?.name || `Zone ${zoneId}`} - all lifeguards will be alerted immediately`,
       [
         {
           text: "Cancel",
@@ -192,19 +198,25 @@ export default function DashboardScreen() {
         },
         {
           text: "CONFIRM SOS",
-          onPress: () => {
+          onPress: async () => {
             setSosActive(true);
-            Alert.alert(
-              "✅ SOS Activated",
-              `Emergency alert sent to all lifeguards at zone ${zones[0]?.name || ""}`,
-              [{ text: "OK", onPress: () => setTimeout(() => setSosActive(false), 5000) }]
-            );
+            try {
+              await api.lifeguardSos(lifeguard.id, zoneId);
+              Alert.alert(
+                "✅ SOS Activated",
+                `Emergency alert sent to all lifeguards at ${zones[0]?.name || `Zone ${zoneId}`}.`,
+                [{ text: "OK", onPress: () => setTimeout(() => setSosActive(false), 5000) }]
+              );
+            } catch (error) {
+              setSosActive(false);
+              Alert.alert("SOS failed", error?.message || "The emergency alert could not be sent.");
+            }
           },
           style: "destructive",
         },
       ]
     );
-  }, [zones]);
+  }, [api, assignedZones, lifeguard?.id, zones]);
 
   const content = useMemo(() => {
     if (!baseUrl) {

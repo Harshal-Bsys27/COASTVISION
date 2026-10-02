@@ -77,11 +77,15 @@ export default function EventLogsScreen() {
   const submitResponse = useCallback(
     async (event, status) => {
       if (!lifeguard?.id || respondingId) return;
-      setRespondingId(event.id);
+      const eventKey = String(event.alertId || event.id);
+      setRespondingId(eventKey);
       try {
+        if (!event.alertId) {
+          throw new Error("This alert has no response ID. Refresh the alert list and try again.");
+        }
         const result = await api.lifeguardRespond(lifeguard.id, event.alertId, event.zone, status);
-        setRespondedIds((prev) => new Set(prev).add(event.id));
-        setLocalResponseStatuses((prev) => new Map(prev).set(String(event.id), status));
+        setRespondedIds((prev) => new Set(prev).add(eventKey));
+        setLocalResponseStatuses((prev) => new Map(prev).set(eventKey, status));
         const seconds = result?.response_time_seconds;
         const label = status === "en_route" ? "En route" : status === "resolved" ? "Resolved" : "Acknowledged";
         const message = seconds != null
@@ -318,9 +322,9 @@ export default function EventLogsScreen() {
               <ActivityEventCard
                 event={item}
                 onRespond={item.respondable ? handleRespond : undefined}
-                responding={respondingId === item.id}
-                responded={respondedIds.has(item.id) || respondedIdsFromApi.has(item.id)}
-                responseStatus={localResponseStatuses.get(String(item.id)) || eventStatus || ""}
+                responding={respondingId === String(item.alertId || item.id)}
+                responded={respondedIds.has(String(item.alertId || item.id)) || respondedIdsFromApi.has(item.id)}
+                responseStatus={localResponseStatuses.get(String(item.alertId || item.id)) || eventStatus || ""}
               />
             );
           }}
