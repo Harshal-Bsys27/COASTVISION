@@ -58,7 +58,7 @@ This makes the project useful both as a computer vision system and as an inciden
 5. Record alert events and lifeguard responses for review and reporting.
 6. Reduce human dependency by making the system assistive rather than fully autonomous.
 
----
+-----
 
 ## Demo Video
 
