@@ -17,7 +17,7 @@ import traceback
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, List, Optional, Tuple
 
 # Load environment variables from .env file
@@ -1696,15 +1696,34 @@ def upload_video():
 @app.route("/api/videos/<filename>", methods=["DELETE"])
 def delete_video(filename: str):
     """Delete a video file and stop its zone."""
-    safe_name = Path(filename).name
-    p = VIDEO_DIR / safe_name
-    if not p.exists():
-        return jsonify({"error": f"File '{safe_name}' not found"}), 404
+    windows_path = PureWindowsPath(filename)
+    if (
+        not filename
+        or "\x00" in filename
+        or filename in {".", ".."}
+        or Path(filename).name != filename
+        or windows_path.name != filename
+        or windows_path.drive
+    ):
+        return jsonify({"error": "Invalid filename"}), 400
+
+    if Path(filename).suffix.lower() not in _VIDEO_EXTENSIONS:
+        return jsonify({"error": "Unsupported video file"}), 400
+
+    video_root = VIDEO_DIR.resolve()
+    p = video_root / filename
+    try:
+        resolved_path = p.resolve()
+        resolved_path.relative_to(video_root)
+    except (OSError, RuntimeError, ValueError):
+        return jsonify({"error": "Invalid filename"}), 400
+    if not p.is_file():
+        return jsonify({"error": f"File '{filename}' not found"}), 404
 
     # Find and stop corresponding zone
     name_map = _zid_to_filename()
     zid_for_name = {v: k for k, v in name_map.items()}
-    zid = zid_for_name.get(safe_name)
+    zid = zid_for_name.get(filename)
     if zid:
         zs = _zones.pop(zid, None)
         if zs:
@@ -1716,7 +1735,7 @@ def delete_video(filename: str):
                     pass
         VIDEO_PATHS.pop(zid, None)
         _zone_threads.pop(zid, None)
-        _video_name_to_zid.pop(safe_name, None)
+        _video_name_to_zid.pop(filename, None)
 
     try:
         p.unlink()
@@ -1725,7 +1744,7 @@ def delete_video(filename: str):
 
     global ZONE_IDS
     ZONE_IDS = _find_zone_ids(VIDEO_DIR)
-    return jsonify({"ok": True, "deleted": safe_name, "zones": [z for z in ZONE_IDS]})
+    return jsonify({"ok": True, "deleted": filename, "zones": [z for z in ZONE_IDS]})
 
 @app.route("/api/zones/<int:zid>/frame.jpg", methods=["GET"])
 def zone_frame(zid: int):
