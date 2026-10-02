@@ -1698,6 +1698,10 @@ def delete_video(filename: str):
     """Delete a video file and stop its zone."""
     safe_name = Path(filename).name
     p = VIDEO_DIR / safe_name
+    try:
+        p.resolve().relative_to(VIDEO_DIR.resolve())
+    except ValueError:
+        return jsonify({"error": "Invalid filename"}), 400
     if not p.exists():
         return jsonify({"error": f"File '{safe_name}' not found"}), 404
 
