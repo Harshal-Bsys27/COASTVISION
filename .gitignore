@@ -65,6 +65,7 @@ Thumbs.db
 # ==============================
 # FRONTEND / DASHBOARD
 # ==============================
+/.expo/
 frontend/**/uploads/
 frontend/**/*.db
 frontend/**/.streamlit/
