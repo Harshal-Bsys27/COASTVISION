@@ -1515,4 +1515,4 @@ All development changes in reverse chronological order.
 
 ---
 
-*This document covers the complete CoastVision AI project as of March 2026. It is updated whenever features are added, bugs are fixed, or architecture changes. See also `docs/project_plan.md` for a summary/viva guide explaining the system from end to end.*
+*This document covers the complete CoastVision AI project as of September 2026. It is updated whenever features are added, bugs are fixed, or architecture changes. See also `docs/project_plan.md` for a summary/viva guide explaining the system from end to end.*
